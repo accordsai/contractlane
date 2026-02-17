@@ -1,0 +1,66 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: cel
+      POSTGRES_PASSWORD: cel
+      POSTGRES_DB: cel
+    ports:
+      - "5432:5432"
+
+  migrate:
+    image: migrate/migrate:v4.17.1
+    depends_on:
+      - postgres
+    volumes:
+      - ./migrations:/migrations:ro
+    entrypoint: ["migrate"]
+    command: ["-path","/migrations","-database","postgres://cel:cel@postgres:5432/cel?sslmode=disable","up"]
+
+  ial:
+    build:
+      context: .
+      dockerfile: services/ial/Dockerfile.dev
+    environment:
+      DATABASE_URL: postgres://cel:cel@postgres:5432/cel?sslmode=disable
+      SERVICE_PORT: "8081"
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./:/app
+    depends_on:
+      - postgres
+
+  cel:
+    build:
+      context: .
+      dockerfile: services/cel/Dockerfile.dev
+    environment:
+      DATABASE_URL: postgres://cel:cel@postgres:5432/cel?sslmode=disable
+      SERVICE_PORT: "8082"
+      IAL_BASE_URL: http://ial:8081/ial
+      EXEC_BASE_URL: http://execution:8083/exec
+    ports:
+      - "8082:8082"
+    volumes:
+      - ./:/app
+    depends_on:
+      - postgres
+      - ial
+
+  execution:
+    build:
+      context: .
+      dockerfile: services/execution/Dockerfile.dev
+    environment:
+      DATABASE_URL: postgres://cel:cel@postgres:5432/cel?sslmode=disable
+      SERVICE_PORT: "8083"
+    ports:
+      - "8083:8083"
+    volumes:
+      - ./:/app
+    depends_on:
+      - postgres
+

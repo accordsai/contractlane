@@ -1,0 +1,10 @@
+root = "/app"
+tmp_dir = "/tmp/air-ial"
+[build]
+cmd = "go build -o /tmp/air-ial/ial ./services/ial/cmd/server"
+bin = "/tmp/air-ial/ial"
+include_ext = ["go","mod"]
+exclude_dir = ["ui","node_modules","tmp","vendor",".git"]
+stop_on_error = true
+[log]
+time = true
