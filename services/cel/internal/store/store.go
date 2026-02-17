@@ -48,8 +48,8 @@ ON CONFLICT (template_id) DO NOTHING`, tplID)
 	_, _ = tx.Exec(ctx, `INSERT INTO template_variables(template_id,var_key,var_type,required,sensitivity,set_policy,constraints)
 VALUES
 ($1,'effective_date','DATE',true,'NONE','AGENT_ALLOWED','{}'::jsonb),
-($1,'party_address','ADDRESS',true,'PII','DEFER_TO_IDENTITY','{}'::jsonb),
-($1,'price','MONEY',false,'NONE','DEFER_TO_IDENTITY','{}'::jsonb)
+($1,'party_address','ADDRESS',true,'PII','HUMAN_REQUIRED','{}'::jsonb),
+($1,'price','MONEY',false,'NONE','AGENT_FILL_HUMAN_REVIEW','{}'::jsonb)
 ON CONFLICT (template_id,var_key) DO NOTHING`, tplID)
 
 	if err := tx.Commit(ctx); err != nil { return "", err }

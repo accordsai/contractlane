@@ -1,0 +1,16 @@
+DROP TABLE IF EXISTS contract_events;
+DROP TABLE IF EXISTS signature_envelopes;
+DROP TABLE IF EXISTS approval_decisions;
+DROP TABLE IF EXISTS approval_requests;
+DROP TABLE IF EXISTS contract_variables;
+DROP TABLE IF EXISTS contracts;
+DROP TABLE IF EXISTS principal_templates;
+DROP TABLE IF EXISTS template_variables;
+DROP TABLE IF EXISTS template_governance;
+DROP TABLE IF EXISTS templates;
+DROP TABLE IF EXISTS policy_profiles;
+DROP TABLE IF EXISTS webauthn_credentials;
+DROP TABLE IF EXISTS invites;
+DROP TABLE IF EXISTS agent_credentials;
+DROP TABLE IF EXISTS actors;
+DROP TABLE IF EXISTS principals;

@@ -1,5 +1,6 @@
 FROM golang:1.22-alpine
-RUN apk add --no-cache git bash
+
+
+RUN apk add --no-cache ca-certificates git bash && update-ca-certificates
 WORKDIR /app
-RUN go install github.com/air-verse/air@latest
-CMD ["air","-c","services/cel/.air.toml"]
+CMD ["go","run","./services/cel/cmd/server"]

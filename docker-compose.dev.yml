@@ -1,4 +1,3 @@
-version: "3.9"
 
 services:
   postgres:
@@ -14,10 +13,11 @@ services:
     image: migrate/migrate:v4.17.1
     depends_on:
       - postgres
+    working_dir: /work
     volumes:
-      - ./migrations:/migrations:ro
+      - ./:/work
     entrypoint: ["migrate"]
-    command: ["-path","/migrations","-database","postgres://cel:cel@postgres:5432/cel?sslmode=disable","up"]
+    command: ["-path","/work/migrations","-database","postgres://cel:cel@postgres:5432/cel?sslmode=disable","up"]
 
   ial:
     build:
