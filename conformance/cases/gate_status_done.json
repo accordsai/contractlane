@@ -1,0 +1,9 @@
+{
+  "name": "gate_status_done",
+  "request": {
+    "method": "GET",
+    "path": "/cel/gates/terms_current/status",
+    "query": {"external_subject_id": "sub_done"}
+  },
+  "expect": {"status": "DONE"}
+}

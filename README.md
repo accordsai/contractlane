@@ -13,6 +13,29 @@ make test
 make smoke
 ```
 
+## SDK Tests (Local Only)
+Run SDK correctness checks locally against a real docker-compose stack.
+
+```bash
+make up
+make sdk-test
+make down
+```
+
+Run shared conformance checks:
+
+```bash
+make up
+make sdk-conformance
+make down
+```
+
+Notes:
+- `sdk-test` runs Go, TypeScript, and Python SDK suites.
+- TypeScript uses `npm ci` + build before tests.
+- Python uses `python3` explicitly.
+- Integration tests target `CL_BASE_URL` (default `http://localhost:8080`).
+
 ## Services
 - `services/ial` — Identity & Authority Layer
 - `services/cel` — Contract Execution Layer
@@ -25,4 +48,3 @@ make smoke
 - `docs/STATE_MACHINE.md`
 - `docs/GATING.md`
 - `docs/DB_SCHEMA.md`
-

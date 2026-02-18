@@ -1,0 +1,209 @@
+openapi: 3.0.3
+info:
+  title: Contract Lane API
+  version: v1
+servers:
+  - url: http://localhost:8082
+components:
+  securitySchemes:
+    PrincipalBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    AgentHmacAuth:
+      type: apiKey
+      in: header
+      name: X-CL-Signature
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code: { type: string }
+        message: { type: string }
+        details: { type: object, additionalProperties: true }
+        request_id: { type: string }
+    NextStep:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [SIGN, FILL_VARIABLES, REVIEW_VARIABLES, APPROVE_ACTION]
+        continue_url:
+          type: string
+          format: uri
+      additionalProperties: true
+    GateResult:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [DONE, BLOCKED]
+        next_step:
+          $ref: '#/components/schemas/NextStep'
+        remediation:
+          type: object
+          additionalProperties: true
+    GateResolveRequest:
+      type: object
+      required: [external_subject_id]
+      properties:
+        external_subject_id: { type: string }
+        actor_type: { type: string, enum: [HUMAN, AGENT] }
+        client_return_url: { type: string, format: uri }
+    ActionResult:
+      type: object
+      required: [result]
+      properties:
+        result:
+          type: string
+          enum: [DONE, BLOCKED, REJECTED]
+        next_step:
+          $ref: '#/components/schemas/NextStep'
+        reason: { type: string }
+        error_code: { type: string }
+        remediation:
+          type: object
+          additionalProperties: true
+    Contract:
+      type: object
+      properties:
+        id: { type: string }
+        contract_id: { type: string }
+        state: { type: string }
+        template_id: { type: string }
+        template_version: { type: string }
+paths:
+  /cel/gates/{gate_key}/status:
+    get:
+      operationId: gateStatus
+      security:
+        - PrincipalBearerAuth: []
+        - AgentHmacAuth: []
+      parameters:
+        - in: path
+          name: gate_key
+          required: true
+          schema: { type: string }
+        - in: query
+          name: external_subject_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Gate status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GateResult' }
+        '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { description: Unauthorized, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Forbidden, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '409': { description: Conflict, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Unprocessable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { description: Rate limit, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '500': { description: Internal error, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /cel/gates/{gate_key}/resolve:
+    post:
+      operationId: gateResolve
+      security:
+        - PrincipalBearerAuth: []
+        - AgentHmacAuth: []
+      parameters:
+        - in: path
+          name: gate_key
+          required: true
+          schema: { type: string }
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GateResolveRequest' }
+      responses:
+        '200':
+          description: Gate resolve result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GateResult' }
+        '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { description: Unauthorized, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Forbidden, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '409': { description: Conflict, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Unprocessable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { description: Rate limit, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '500': { description: Internal error, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /cel/contracts/{id}/actions/{action}:
+    post:
+      operationId: contractAction
+      security:
+        - PrincipalBearerAuth: []
+        - AgentHmacAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: action
+          required: true
+          schema: { type: string }
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Action result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActionResult' }
+        '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { description: Unauthorized, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Forbidden, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '409': { description: Conflict, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Unprocessable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { description: Rate limit, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '500': { description: Internal error, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /cel/contracts/{id}:
+    get:
+      operationId: getContract
+      security:
+        - PrincipalBearerAuth: []
+        - AgentHmacAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Contract
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  contract:
+                    $ref: '#/components/schemas/Contract'
+        '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { description: Unauthorized, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Forbidden, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '409': { description: Conflict, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Unprocessable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { description: Rate limit, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '500': { description: Internal error, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }

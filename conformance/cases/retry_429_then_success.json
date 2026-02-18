@@ -1,0 +1,9 @@
+{
+  "name": "retry_429_then_success",
+  "request": {
+    "method": "GET",
+    "path": "/cel/gates/terms_current/status",
+    "query": {"external_subject_id": "retry429"}
+  },
+  "expect": {"status": "DONE", "with_retries": true}
+}

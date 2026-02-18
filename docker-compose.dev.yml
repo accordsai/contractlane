@@ -43,6 +43,7 @@ services:
       IAL_BASE_URL: http://ial:8081/ial
       EXEC_BASE_URL: http://execution:8083/exec
     ports:
+      - "8080:8082"
       - "8082:8082"
     volumes:
       - ./:/app
@@ -63,4 +64,3 @@ services:
       - ./:/app
     depends_on:
       - postgres
-

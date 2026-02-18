@@ -1,0 +1,35 @@
+{
+  "name": "@contractlane/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/cjs/index.cjs",
+  "module": "dist/esm/index.js",
+  "types": "dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.cjs",
+      "default": "./dist/esm/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && npm run build:esm && npm run build:cjs && npm run finalize:cjs",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "finalize:cjs": "node -e \"require('node:fs').renameSync('dist/cjs/index.js','dist/cjs/index.cjs')\"",
+    "lint": "tsc -p tsconfig.base.json --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "pack": "npm pack --dry-run"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.0",
+    "tsx": "4.19.2",
+    "typescript": "5.7.2"
+  }
+}

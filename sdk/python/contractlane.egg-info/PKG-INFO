@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: contractlane
+Version: 0.1.0
+Summary: Contract Lane Python SDK
+Requires-Python: >=3.9
+Requires-Dist: httpx>=0.27.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"

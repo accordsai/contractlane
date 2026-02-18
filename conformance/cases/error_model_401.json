@@ -1,0 +1,12 @@
+{
+  "name": "error_model_401",
+  "request": {
+    "method": "GET",
+    "path": "/cel/gates/terms_current/status",
+    "query": {"external_subject_id": "unauth"}
+  },
+  "expect_error": {
+    "status_code": 401,
+    "error_code": "UNAUTHORIZED"
+  }
+}
