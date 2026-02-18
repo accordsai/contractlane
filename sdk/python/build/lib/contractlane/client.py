@@ -115,58 +115,6 @@ class ContractLaneClient:
         raw = self._request("GET", path, None, None, True)
         return raw.get("evidence", raw) if isinstance(raw, dict) else raw
 
-    def get_contract_evidence(
-        self,
-        contract_id: str,
-        format: Optional[str] = None,
-        include: Optional[list[str]] = None,
-        redact: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        q: list[str] = []
-        if format:
-            q.append(f"format={quote(format, safe='')}")
-        if include:
-            q.append(f"include={quote(','.join(include), safe='')}")
-        if redact:
-            q.append(f"redact={quote(redact, safe='')}")
-        suffix = ("?" + "&".join(q)) if q else ""
-        path = f"/cel/contracts/{quote(contract_id, safe='')}/evidence{suffix}"
-        return self._request("GET", path, None, None, True)
-
-    def get_contract_render(
-        self,
-        contract_id: str,
-        format: Optional[str] = None,
-        locale: Optional[str] = None,
-        include_meta: Optional[bool] = None,
-    ) -> Dict[str, Any]:
-        q: list[str] = []
-        if format:
-            q.append(f"format={quote(format, safe='')}")
-        if locale:
-            q.append(f"locale={quote(locale, safe='')}")
-        if include_meta is not None:
-            q.append(f"include_meta={'true' if include_meta else 'false'}")
-        suffix = ("?" + "&".join(q)) if q else ""
-        path = f"/cel/contracts/{quote(contract_id, safe='')}/render{suffix}"
-        return self._request("GET", path, None, None, True)
-
-    def render_template(
-        self,
-        template_id: str,
-        version: str,
-        variables: Dict[str, str],
-        format: Optional[str] = None,
-        locale: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        path = f"/cel/templates/{quote(template_id, safe='')}/versions/{quote(version, safe='')}/render"
-        body: Dict[str, Any] = {"variables": variables}
-        if format:
-            body["format"] = format
-        if locale:
-            body["locale"] = locale
-        return self._request("POST", path, body, None, True)
-
     def _request(self, method: str, path_with_query: str, body: Optional[Dict[str, Any]], extra_headers: Optional[Dict[str, str]], retryable: bool) -> Dict[str, Any]:
         body_bytes = stable_json(body) if body is not None else ""
         attempts = self.retry.max_attempts if retryable else 1

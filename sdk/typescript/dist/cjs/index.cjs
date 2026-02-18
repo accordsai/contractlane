@@ -111,6 +111,61 @@ class ContractLaneClient {
         const raw = await this.request('GET', path, undefined, undefined, true);
         return raw.evidence ?? raw;
     }
+    async getContractEvidence(contractId, opts) {
+        const q = new URLSearchParams();
+        if (opts?.format)
+            q.set('format', opts.format);
+        if (opts?.include && opts.include.length > 0)
+            q.set('include', opts.include.join(','));
+        if (opts?.redact)
+            q.set('redact', opts.redact);
+        const suffix = q.toString() ? `?${q.toString()}` : '';
+        const path = `/cel/contracts/${encodeURIComponent(contractId)}/evidence${suffix}`;
+        return this.request('GET', path, undefined, undefined, true);
+    }
+    async getContractRender(contractId, opts) {
+        const q = new URLSearchParams();
+        if (opts?.format)
+            q.set('format', opts.format);
+        if (opts?.locale)
+            q.set('locale', opts.locale);
+        if (opts?.includeMeta !== undefined)
+            q.set('include_meta', String(opts.includeMeta));
+        const suffix = q.toString() ? `?${q.toString()}` : '';
+        const path = `/cel/contracts/${encodeURIComponent(contractId)}/render${suffix}`;
+        const raw = await this.request('GET', path, undefined, undefined, true);
+        return {
+            contract_id: raw.contract_id,
+            principal_id: raw.principal_id,
+            template_id: raw.template_id,
+            template_version: raw.template_version,
+            contract_state: raw.contract_state,
+            format: raw.format,
+            locale: raw.locale,
+            rendered: raw.rendered ?? '',
+            render_hash: raw.render_hash ?? '',
+            packet_hash: raw.packet_hash,
+            variables_hash: raw.variables_hash ?? '',
+            variables_snapshot: raw.variables_snapshot,
+            determinism_version: raw.determinism_version,
+            raw,
+        };
+    }
+    async renderTemplate(templateId, version, variables, opts) {
+        const path = `/cel/templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(version)}/render`;
+        const raw = await this.request('POST', path, { variables, format: opts?.format, locale: opts?.locale }, undefined, true);
+        return {
+            template_id: raw.template_id ?? templateId,
+            template_version: raw.template_version ?? version,
+            format: raw.format,
+            locale: raw.locale,
+            rendered: raw.rendered ?? '',
+            render_hash: raw.render_hash ?? '',
+            variables_hash: raw.variables_hash ?? '',
+            determinism_version: raw.determinism_version,
+            raw,
+        };
+    }
     parseGate(raw) {
         const next = (raw.next_step ?? raw.remediation ?? null);
         return { status: raw.status ?? 'BLOCKED', nextStep: next, remediation: raw.remediation, raw };

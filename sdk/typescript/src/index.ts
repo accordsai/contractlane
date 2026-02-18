@@ -13,6 +13,34 @@ export type GateResult = { status: 'DONE' | 'BLOCKED'; nextStep?: NextStep | nul
 export type ActionResult = { result: 'DONE' | 'BLOCKED' | 'REJECTED'; nextStep?: NextStep | null; rejection?: { reason?: string; errorCode?: string }; remediation?: Record<string, unknown>; raw: Record<string, unknown> };
 export type Contract = { id: string; state?: string; template_id?: string; template_version?: string; raw: Record<string, unknown> };
 export type Evidence = Record<string, unknown>;
+export type ContractEvidenceBundle = Record<string, unknown>;
+export type ContractRender = {
+  contract_id: string;
+  principal_id?: string;
+  template_id?: string;
+  template_version?: string;
+  contract_state?: string;
+  format?: 'text' | 'html';
+  locale?: string;
+  rendered: string;
+  render_hash: string;
+  packet_hash?: string;
+  variables_hash: string;
+  variables_snapshot?: Record<string, string>;
+  determinism_version?: string;
+  raw: Record<string, unknown>;
+};
+export type TemplateRender = {
+  template_id: string;
+  template_version: string;
+  format?: 'text' | 'html';
+  locale?: string;
+  rendered: string;
+  render_hash: string;
+  variables_hash: string;
+  determinism_version?: string;
+  raw: Record<string, unknown>;
+};
 
 export class ContractLaneError extends Error {
   status_code: number;
@@ -141,6 +169,58 @@ export class ContractLaneClient {
     const path = `/cel/gates/${encodeURIComponent(gateKey)}/evidence?external_subject_id=${encodeURIComponent(externalSubjectId)}`;
     const raw = await this.request('GET', path, undefined, undefined, true);
     return (raw.evidence as Record<string, unknown> | undefined) ?? raw;
+  }
+
+  async getContractEvidence(contractId: string, opts?: { format?: 'json' | 'zip'; include?: Array<'render' | 'signatures' | 'approvals' | 'events' | 'variables'>; redact?: 'none' | 'pii' }): Promise<ContractEvidenceBundle> {
+    const q = new URLSearchParams();
+    if (opts?.format) q.set('format', opts.format);
+    if (opts?.include && opts.include.length > 0) q.set('include', opts.include.join(','));
+    if (opts?.redact) q.set('redact', opts.redact);
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    const path = `/cel/contracts/${encodeURIComponent(contractId)}/evidence${suffix}`;
+    return this.request('GET', path, undefined, undefined, true);
+  }
+
+  async getContractRender(contractId: string, opts?: { format?: 'text' | 'html'; locale?: string; includeMeta?: boolean }): Promise<ContractRender> {
+    const q = new URLSearchParams();
+    if (opts?.format) q.set('format', opts.format);
+    if (opts?.locale) q.set('locale', opts.locale);
+    if (opts?.includeMeta !== undefined) q.set('include_meta', String(opts.includeMeta));
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    const path = `/cel/contracts/${encodeURIComponent(contractId)}/render${suffix}`;
+    const raw = await this.request('GET', path, undefined, undefined, true);
+    return {
+      contract_id: raw.contract_id as string,
+      principal_id: raw.principal_id as string | undefined,
+      template_id: raw.template_id as string | undefined,
+      template_version: raw.template_version as string | undefined,
+      contract_state: raw.contract_state as string | undefined,
+      format: raw.format as 'text' | 'html' | undefined,
+      locale: raw.locale as string | undefined,
+      rendered: (raw.rendered as string | undefined) ?? '',
+      render_hash: (raw.render_hash as string | undefined) ?? '',
+      packet_hash: raw.packet_hash as string | undefined,
+      variables_hash: (raw.variables_hash as string | undefined) ?? '',
+      variables_snapshot: raw.variables_snapshot as Record<string, string> | undefined,
+      determinism_version: raw.determinism_version as string | undefined,
+      raw,
+    };
+  }
+
+  async renderTemplate(templateId: string, version: string, variables: Record<string, string>, opts?: { format?: 'text' | 'html'; locale?: string }): Promise<TemplateRender> {
+    const path = `/cel/templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(version)}/render`;
+    const raw = await this.request('POST', path, { variables, format: opts?.format, locale: opts?.locale }, undefined, true);
+    return {
+      template_id: (raw.template_id as string | undefined) ?? templateId,
+      template_version: (raw.template_version as string | undefined) ?? version,
+      format: raw.format as 'text' | 'html' | undefined,
+      locale: raw.locale as string | undefined,
+      rendered: (raw.rendered as string | undefined) ?? '',
+      render_hash: (raw.render_hash as string | undefined) ?? '',
+      variables_hash: (raw.variables_hash as string | undefined) ?? '',
+      determinism_version: raw.determinism_version as string | undefined,
+      raw,
+    };
   }
 
   private parseGate(raw: Record<string, unknown>): GateResult {

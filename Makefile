@@ -3,7 +3,7 @@ SHELL := /bin/bash
 PY_SDK_VENV := sdk/python/.venv
 PY_SDK_PYTHON := $(PY_SDK_VENV)/bin/python
 
-.PHONY: up up-dev down migrate test smoke logs fmt sdk-test sdk-conformance wait-ready sdk-python-venv
+.PHONY: up up-dev down migrate test smoke logs fmt sdk-test sdk-conformance wait-ready sdk-python-venv sdk-sanity
 
 up:
 	docker compose -f docker-compose.dev.yml up --build -d
@@ -53,6 +53,27 @@ sdk-test: wait-ready
 
 sdk-conformance: wait-ready
 	bash conformance/runner/run_local_conformance.sh
+
+sdk-sanity:
+	@set -euo pipefail; \
+	root="$(CURDIR)"; \
+	cleanup() { $(MAKE) -C "$$root" down; }; \
+	trap cleanup EXIT; \
+	$(MAKE) -C "$$root" up; \
+	$(MAKE) -C "$$root" sdk-test; \
+	$(MAKE) -C "$$root" sdk-conformance; \
+	ts_tmp="$$(mktemp -d)"; \
+	mkdir -p "$$ts_tmp/node_modules/@contractlane"; \
+	ln -s "$$root/sdk/typescript" "$$ts_tmp/node_modules/@contractlane/sdk"; \
+	(cd "$$ts_tmp" && node -e "const sdk=require('@contractlane/sdk'); if(!sdk.ContractLaneClient){throw new Error('missing ContractLaneClient export for require')}"); \
+	(cd "$$ts_tmp" && node --input-type=module -e "import { ContractLaneClient } from '@contractlane/sdk'; if(!ContractLaneClient){throw new Error('missing ContractLaneClient export for import')}"); \
+	py_tmp="$$(mktemp -d)"; \
+	python3 -m venv "$$py_tmp/.venv"; \
+	PYTHONNOUSERSITE=1 "$$py_tmp/.venv/bin/python" -m pip install -U pip setuptools wheel >/dev/null; \
+	PYTHONNOUSERSITE=1 "$$py_tmp/.venv/bin/python" -m pip install "$$root/sdk/python" >/dev/null; \
+	PYTHONNOUSERSITE=1 "$$py_tmp/.venv/bin/python" -c "from contractlane import ContractLaneClient, PrincipalAuth; c=ContractLaneClient('http://localhost:8080', PrincipalAuth('tok')); assert c is not None"; \
+	trap - EXIT; \
+	$(MAKE) -C "$$root" down
 
 logs:
 	docker compose -f docker-compose.dev.yml logs -f --tail=200

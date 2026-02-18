@@ -228,6 +228,8 @@ ML_FINISH="$(curl_json POST "$BASE_IAL/auth/magic-link/finish" \
   "{\"token\":\"$ML_TOKEN\"}")"
 HUMAN_SESSION_TOKEN="$(echo "$ML_FINISH" | jq -er '.credentials.token')"
 HUMAN_AUTH="Authorization: Bearer $HUMAN_SESSION_TOKEN"
+printf "export HUMAN_AUTH=%q\n" "$HUMAN_AUTH" >> /tmp/accords_env.sh
+printf "export AGENT_AUTH=%q\n" "$AGENT_AUTH" >> /tmp/accords_env.sh
 ME="$(curl_json GET "$BASE_IAL/auth/me" "" "$HUMAN_AUTH")"
 ME_ACTOR="$(echo "$ME" | jq -er '.actor.actor_id')"
 [[ "$ME_ACTOR" == "$ACT_H" ]] || { echo "Expected auth/me actor $ACT_H, got $ME_ACTOR"; exit 1; }
@@ -458,8 +460,16 @@ PLAT_EVIDENCE_ENVELOPE_ID="$(echo "$PLAT_EVIDENCE" | jq -er '.evidence.accepted.
 [[ -n "$PLAT_EVIDENCE_ENVELOPE_ID" ]] || { echo "Expected envelope reference in evidence"; exit 1; }
 
 CTR_EVIDENCE="$(curl_json GET "$BASE_CEL/contracts/$PLAT_V2_CONTRACT_ID/evidence" "" "$AGENT_AUTH")"
-CTR_EVIDENCE_CID="$(echo "$CTR_EVIDENCE" | jq -er '.evidence.accepted.contract_id')"
+CTR_EVIDENCE_CID="$(echo "$CTR_EVIDENCE" | jq -er '.contract.contract_id')"
+CTR_EVIDENCE_BUNDLE_VERSION="$(echo "$CTR_EVIDENCE" | jq -er '.bundle_version')"
+CTR_EVIDENCE_BH="$(echo "$CTR_EVIDENCE" | jq -er '.hashes.bundle_hash')"
+CTR_EVIDENCE_HAS_CONTRACT="$(echo "$CTR_EVIDENCE" | jq -er '[.manifest.artifacts[] | select(.artifact_type=="contract_record")] | length')"
+CTR_EVIDENCE_HAS_RENDER="$(echo "$CTR_EVIDENCE" | jq -er '[.manifest.artifacts[] | select(.artifact_type=="render")] | length')"
 [[ "$CTR_EVIDENCE_CID" == "$PLAT_V2_CONTRACT_ID" ]] || { echo "Expected contract evidence to reference requested contract"; exit 1; }
+[[ "$CTR_EVIDENCE_BUNDLE_VERSION" == "evidence-v1" ]] || { echo "Expected evidence-v1 bundle, got $CTR_EVIDENCE_BUNDLE_VERSION"; exit 1; }
+[[ "$CTR_EVIDENCE_BH" == sha256:* ]] || { echo "Expected bundle_hash in contract evidence"; exit 1; }
+[[ "$CTR_EVIDENCE_HAS_CONTRACT" -ge 1 ]] || { echo "Expected contract_record artifact"; exit 1; }
+[[ "$CTR_EVIDENCE_HAS_RENDER" -ge 1 ]] || { echo "Expected render artifact"; exit 1; }
 
 # Cross-tenant evidence read denied.
 curl_json_expect_status 404 GET "$BASE_CEL/contracts/$PLAT_V2_CONTRACT_ID/evidence" "" "$AGENT_T2_AUTH" >/dev/null
@@ -473,6 +483,7 @@ CTR_REPLAY="$(curl_json POST "$BASE_CEL/contracts" "$CREATE_REQ" "$AGENT_AUTH")"
 assert_json_equal "$CTR" "$CTR_REPLAY" "contracts:create"
 CID="$(echo "$CTR" | jq -er '.contract.contract_id')"
 echo "contract_id=$CID"
+printf "export CONTRACT_ID=%q\n" "$CID" >> /tmp/accords_env.sh
 
 CHG_REQ="{\"actor_context\":{\"principal_id\":\"$PRN\",\"actor_id\":\"$AGT\",\"actor_type\":\"AGENT\"},\"changeset\":{\"variables\":{},\"clauses\":[{\"op\":\"replace\",\"target\":\"clause.confidentiality\",\"value\":\"Mutual NDA\"}]},\"required_roles\":[\"LEGAL\"]}"
 CHG_CREATE="$(curl_json POST "$BASE_CEL/contracts/$CID/changesets" "$CHG_REQ" "$AGENT_AUTH")"
@@ -595,6 +606,22 @@ RH2="$(echo "$B2" | jq -er '.bundle.hashes.risk_hash')"
 AD_COUNT="$(echo "$B1" | jq -er '.bundle.hash_inputs.packet_input.approval_decisions | length')"
 [[ "$AD_COUNT" == "1" ]] || { echo "Expected 1 approval decision in hash inputs, got $AD_COUNT"; exit 1; }
 
+CR1="$(curl_json GET "$BASE_CEL/contracts/$CID/render?format=text&locale=en-US" "" "$AGENT_AUTH")"
+CR2="$(curl_json GET "$BASE_CEL/contracts/$CID/render?format=text&locale=en-US" "" "$AGENT_AUTH")"
+CR_RENDERED1="$(echo "$CR1" | jq -er '.rendered')"
+CR_RENDERED2="$(echo "$CR2" | jq -er '.rendered')"
+CR_RH1="$(echo "$CR1" | jq -er '.render_hash')"
+CR_RH2="$(echo "$CR2" | jq -er '.render_hash')"
+CR_VH1="$(echo "$CR1" | jq -er '.variables_hash')"
+CR_VH2="$(echo "$CR2" | jq -er '.variables_hash')"
+CR_PH1="$(echo "$CR1" | jq -er '.packet_hash')"
+CR_PH2="$(echo "$CR2" | jq -er '.packet_hash')"
+[[ -n "$CR_RENDERED1" ]] || { echo "Expected non-empty canonical rendered text"; exit 1; }
+[[ "$CR_RENDERED1" == "$CR_RENDERED2" ]] || { echo "canonical rendered output unstable across runs"; exit 1; }
+[[ "$CR_RH1" == "$CR_RH2" ]] || { echo "render_hash unstable across runs"; exit 1; }
+[[ "$CR_VH1" == "$CR_VH2" ]] || { echo "variables_hash unstable across runs"; exit 1; }
+[[ "$CR_PH1" == "$CR_PH2" ]] || { echo "packet_hash unstable across runs for contract render"; exit 1; }
+
 R1="$(curl_json POST "$BASE_CEL/contracts/$CID:render" "{}")"
 R2="$(curl_json POST "$BASE_CEL/contracts/$CID:render" "{}")"
 RP1="$(echo "$R1" | jq -er '.hashes.packet_hash')"
@@ -606,5 +633,20 @@ RR2="$(echo "$R2" | jq -er '.hashes.risk_hash')"
 [[ "$RP1" == "$RP2" ]] || { echo "render packet_hash unstable across runs"; exit 1; }
 [[ "$RD1" == "$RD2" ]] || { echo "render diff_hash unstable across runs"; exit 1; }
 [[ "$RR1" == "$RR2" ]] || { echo "render risk_hash unstable across runs"; exit 1; }
+
+echo "== Slice 11 delegation e2e =="
+CEL_URL="http://localhost:8082" \
+IAL_URL="http://localhost:8081" \
+SLICE11_FROM_SMOKE="1" \
+PRINCIPAL_ID="$PRN" \
+SETUP_AGENT_ACTOR_ID="$AGT" \
+SETUP_AGENT_AUTH="$AGENT_AUTH" \
+DELEGATOR_ACTOR_ID="$ACT_H" \
+HUMAN_AUTH="$HUMAN_AUTH" \
+DELEGATE_ACTOR_ID="$AGT_LOW" \
+AGENT_AUTH="$AGENT_LOW_AUTH" \
+CONTRACT_ID="$CID" \
+TEMPLATE_ID="$TPL" \
+bash scripts/test_slice11_delegation.sh
 
 echo "Smoke test PASSED"

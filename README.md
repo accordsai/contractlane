@@ -13,6 +13,46 @@ make test
 make smoke
 ```
 
+## Local Dev Token + Terms Program Seed (IAL bootstrap)
+CEL endpoints use bearer auth. For local-only usage, enable the dev bootstrap endpoint in IAL.
+
+```bash
+IAL_DEV_BOOTSTRAP=true make up
+eval "$(scripts/dev_seed.sh)"
+```
+
+This exports:
+- `TOKEN` (bearer token)
+- `PRINCIPAL_ID`
+- `ACTOR_ID`
+- `GATE_STATUS` (`DONE` or `BLOCKED`)
+
+Example: create/publish a gate program, resolve, then render
+
+```bash
+curl -sS -X POST http://localhost:8082/cel/dev/seed-template \
+  -H 'content-type: application/json' \
+  -d "{\"principal_id\":\"$PRINCIPAL_ID\"}" >/dev/null
+
+curl -sS -X POST http://localhost:8082/cel/programs \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d "{\"actor_context\":{\"principal_id\":\"$PRINCIPAL_ID\",\"actor_id\":\"$ACTOR_ID\",\"actor_type\":\"AGENT\",\"idempotency_key\":\"dev-prog-create-1\"},\"key\":\"terms_current\",\"mode\":\"STRICT_RECONSENT\"}" >/dev/null
+
+curl -sS -X POST http://localhost:8082/cel/programs/terms_current/publish \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d "{\"actor_context\":{\"principal_id\":\"$PRINCIPAL_ID\",\"actor_id\":\"$ACTOR_ID\",\"actor_type\":\"AGENT\",\"idempotency_key\":\"dev-prog-publish-1\"},\"required_template_id\":\"tpl_nda_us_v1\",\"required_template_version\":\"v1\"}" >/dev/null
+
+CID="$(curl -sS -X POST http://localhost:8082/cel/gates/terms_current/resolve \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"external_subject_id":"dev-user-1","actor_type":"HUMAN","idempotency_key":"dev-resolve-1"}' | jq -r '.contract_id')"
+
+curl -sS "http://localhost:8082/cel/contracts/$CID/render?format=text&locale=en-US" \
+  -H "Authorization: Bearer $TOKEN" | jq
+```
+
 ## SDK Tests (Local Only)
 Run SDK correctness checks locally against a real docker-compose stack.
 
@@ -48,3 +88,4 @@ Notes:
 - `docs/STATE_MACHINE.md`
 - `docs/GATING.md`
 - `docs/DB_SCHEMA.md`
+- `docs/DELEGATION.md`

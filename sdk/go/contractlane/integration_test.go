@@ -3,12 +3,18 @@ package contractlane
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"contractlane/pkg/evp"
 )
 
 type liveEnv struct {
@@ -66,6 +72,92 @@ func TestConformanceLive(t *testing.T) {
 	}
 	if blocked.Status != "BLOCKED" && blocked.Status != "DONE" {
 		t.Fatalf("bad union status: %q", blocked.Status)
+	}
+}
+
+func TestContractEvidenceManifestHashRulesLive(t *testing.T) {
+	if os.Getenv("CL_INTEGRATION") != "1" {
+		t.Skip("set CL_INTEGRATION=1 to run live integration")
+	}
+	env := setupLiveEnv(t)
+	client := NewClient(env.BaseURL, PrincipalAuth{Token: env.Token})
+
+	subject := "go-evidence-" + NewIdempotencyKey()
+	resolve, err := client.GateResolve(context.Background(), "terms_current", subject, ResolveOptions{
+		ActorType:      "HUMAN",
+		IdempotencyKey: NewIdempotencyKey(),
+	})
+	if err != nil {
+		t.Fatalf("GateResolve: %v", err)
+	}
+	contractID, _ := resolve.Raw["contract_id"].(string)
+	if contractID == "" {
+		t.Fatalf("GateResolve missing contract_id in response: %#v", resolve.Raw)
+	}
+
+	evidence, err := client.GetContractEvidence(context.Background(), contractID, "json", nil, "none")
+	if err != nil {
+		t.Fatalf("GetContractEvidence: %v", err)
+	}
+	manifest, _ := evidence["manifest"].(map[string]any)
+	if manifest == nil {
+		t.Fatalf("missing manifest in evidence response")
+	}
+	canonicalization, _ := manifest["canonicalization"].(map[string]any)
+	if canonicalization == nil {
+		t.Fatalf("missing manifest.canonicalization")
+	}
+	if got := fmt.Sprint(canonicalization["manifest_hash_rule"]); got != "canonical_json_sorted_keys_v1" {
+		t.Fatalf("unexpected manifest_hash_rule=%q", got)
+	}
+	if got := fmt.Sprint(canonicalization["bundle_hash_rule"]); got != "concat_artifact_hashes_v1" {
+		t.Fatalf("unexpected bundle_hash_rule=%q", got)
+	}
+	descs, _ := manifest["artifacts"].([]any)
+	if len(descs) == 0 {
+		t.Fatalf("manifest.artifacts is empty")
+	}
+	foundDelegations := false
+	for _, raw := range descs {
+		d, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("artifact descriptor has invalid shape: %#v", raw)
+		}
+		if fmt.Sprint(d["artifact_type"]) == "delegation_records" {
+			foundDelegations = true
+		}
+		hashOf := strings.TrimSpace(fmt.Sprint(d["hash_of"]))
+		hashRule := strings.TrimSpace(fmt.Sprint(d["hash_rule"]))
+		expected := strings.TrimSpace(fmt.Sprint(d["sha256"]))
+		if hashOf == "" || hashRule == "" || expected == "" {
+			t.Fatalf("artifact descriptor missing hash fields: %#v", d)
+		}
+
+		target, ok := jsonPathGet(evidence, hashOf)
+		if !ok {
+			t.Fatalf("hash_of path not found: %s", hashOf)
+		}
+		actual, err := computeHashByRule(hashRule, target)
+		if err != nil {
+			t.Fatalf("computeHashByRule(%s): %v", hashRule, err)
+		}
+		if actual != expected {
+			t.Fatalf("hash mismatch for %s (%s): expected=%s actual=%s", fmt.Sprint(d["artifact_id"]), hashOf, expected, actual)
+		}
+	}
+	if !foundDelegations {
+		t.Fatalf("expected delegation_records artifact descriptor in evidence manifest")
+	}
+	rawEvidence, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatalf("marshal evidence: %v", err)
+	}
+	verifyResult, err := evp.VerifyBundleJSON(rawEvidence)
+	if err != nil {
+		t.Fatalf("VerifyBundleJSON error: %v", err)
+	}
+	if verifyResult.Status != evp.StatusVerified {
+		t.Fatalf("expected verified evidence bundle, got %s details=%v", verifyResult.Status, verifyResult.Details)
 	}
 }
 
@@ -143,4 +235,45 @@ func getenv(k, d string) string {
 		return d
 	}
 	return v
+}
+
+func jsonPathGet(root map[string]any, path string) (any, bool) {
+	parts := strings.Split(path, ".")
+	if len(parts) == 0 {
+		return nil, false
+	}
+	var cur any = root
+	for _, p := range parts {
+		obj, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		next, ok := obj[p]
+		if !ok {
+			return nil, false
+		}
+		cur = next
+	}
+	return cur, true
+}
+
+func computeHashByRule(rule string, v any) (string, error) {
+	switch rule {
+	case "utf8_v1", "utf8":
+		s, ok := v.(string)
+		if !ok {
+			return "", fmt.Errorf("utf8 rule expects string, got %T", v)
+		}
+		sum := sha256.Sum256([]byte(s))
+		return hex.EncodeToString(sum[:]), nil
+	case "canonical_json_sorted_keys_v1", "canonical_json_sorted_keys":
+		b, err := json.Marshal(v)
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(b)
+		return hex.EncodeToString(sum[:]), nil
+	default:
+		return "", fmt.Errorf("unsupported hash_rule %q", rule)
+	}
 }

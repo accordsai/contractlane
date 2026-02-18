@@ -141,6 +141,18 @@ ON CONFLICT (principal_id,template_id) DO UPDATE SET enabled=true, enabled_by_ac
 	return err
 }
 
+func (s *Store) IsTemplateEnabledForPrincipal(ctx context.Context, principalID, templateID string) (bool, error) {
+	var ok bool
+	err := s.DB.QueryRow(ctx, `
+SELECT EXISTS(
+  SELECT 1
+  FROM principal_templates
+  WHERE principal_id=$1 AND template_id=$2 AND enabled=true
+)
+`, principalID, templateID).Scan(&ok)
+	return ok, err
+}
+
 func (s *Store) GetTemplateVars(ctx context.Context, templateID string) ([]domain.VariableDefinition, error) {
 	rows, err := s.DB.Query(ctx, `SELECT var_key,var_type,required,sensitivity,set_policy,constraints FROM template_variables WHERE template_id=$1 ORDER BY var_key ASC`, templateID)
 	if err != nil {
@@ -489,6 +501,46 @@ func (s *Store) ListApprovalRequests(ctx context.Context, contractID string) ([]
 	return out, rows.Err()
 }
 
+func (s *Store) ListApprovalRequestsForEvidence(ctx context.Context, contractID string) ([]map[string]any, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT approval_request_id,action,status,required_roles,missing_required_vars,needs_human_entry,needs_human_review,created_at,decided_at
+FROM approval_requests
+WHERE contract_id=$1
+ORDER BY created_at ASC, approval_request_id ASC
+`, contractID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var id, action, status string
+		var requiredRoles, missingRequired, needsHumanEntry, needsHumanReview []string
+		var createdAt time.Time
+		var decidedAt *time.Time
+		if err := rows.Scan(&id, &action, &status, &requiredRoles, &missingRequired, &needsHumanEntry, &needsHumanReview, &createdAt, &decidedAt); err != nil {
+			return nil, err
+		}
+		row := map[string]any{
+			"approval_request_id":   id,
+			"action":                action,
+			"status":                status,
+			"required_roles":        requiredRoles,
+			"missing_required_vars": missingRequired,
+			"needs_human_entry":     needsHumanEntry,
+			"needs_human_review":    needsHumanReview,
+			"created_at":            createdAt.UTC().Format(time.RFC3339),
+		}
+		if decidedAt != nil {
+			row["decided_at"] = decidedAt.UTC().Format(time.RFC3339)
+		} else {
+		    row["decided_at"] = nil
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) TransitionState(ctx context.Context, contractID, newState string) error {
 	_, err := s.DB.Exec(ctx, `UPDATE contracts SET state=$1, updated_at=now() WHERE contract_id=$2`, newState, contractID)
 	return err
@@ -515,6 +567,41 @@ func (s *Store) GetEnvelope(ctx context.Context, contractID string) (map[string]
 	var recipients any
 	_ = json.Unmarshal(recipientsB, &recipients)
 	return map[string]any{"provider": provider, "envelope_id": env, "status": status, "signing_url": signingURL, "recipients": recipients}, nil
+}
+
+func (s *Store) ListSignatureEnvelopesForEvidence(ctx context.Context, contractID string) ([]map[string]any, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT provider,envelope_id,status,signing_url,recipients,created_at,updated_at
+FROM signature_envelopes
+WHERE contract_id=$1
+ORDER BY created_at ASC, envelope_id ASC
+`, contractID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var provider, envelopeID, status string
+		var signingURL *string
+		var recipientsB []byte
+		var createdAt, updatedAt time.Time
+		if err := rows.Scan(&provider, &envelopeID, &status, &signingURL, &recipientsB, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		var recipients any
+		_ = json.Unmarshal(recipientsB, &recipients)
+		out = append(out, map[string]any{
+			"provider":    provider,
+			"envelope_id": envelopeID,
+			"status":      status,
+			"signing_url": signingURL,
+			"recipients":  recipients,
+			"created_at":  createdAt.UTC().Format(time.RFC3339),
+			"updated_at":  updatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) AddEvent(ctx context.Context, contractID, typ, actorID string, payload map[string]any) error {
@@ -578,6 +665,145 @@ VALUES($1,$2,$3,$4,$5,$6::jsonb)
 ON CONFLICT (principal_id,actor_id,idempotency_key,endpoint) DO NOTHING
 `, principalID, actorID, idempotencyKey, endpoint, responseStatus, string(body))
 	return err
+}
+
+func (s *Store) ListIdempotencyRecordsForContract(ctx context.Context, principalID, contractID string) ([]map[string]any, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT principal_id,actor_id,idempotency_key,endpoint,response_status,response_body,created_at
+FROM idempotency_records
+WHERE principal_id=$1
+  AND endpoint LIKE '%' || $2 || '%'
+ORDER BY created_at ASC, idempotency_key ASC
+`, principalID, contractID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var pID, actorID, key, endpoint string
+		var responseStatus int
+		var responseBody []byte
+		var createdAt time.Time
+		if err := rows.Scan(&pID, &actorID, &key, &endpoint, &responseStatus, &responseBody, &createdAt); err != nil {
+			return nil, err
+		}
+		var body any
+		_ = json.Unmarshal(responseBody, &body)
+		out = append(out, map[string]any{
+			"principal_id":    pID,
+			"actor_id":        actorID,
+			"idempotency_key": key,
+			"endpoint":        endpoint,
+			"response_status": responseStatus,
+			"response_body":   body,
+			"created_at":      createdAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListActiveDelegationsForEvidence(ctx context.Context, principalID string) ([]map[string]any, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT delegation_id,principal_id,delegator_actor_id,delegate_actor_id,scope,issued_at,expires_at,signature,created_at
+FROM delegation_records
+WHERE principal_id=$1
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR now() < expires_at)
+ORDER BY issued_at ASC, delegation_id ASC
+`, principalID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]map[string]any, 0)
+	for rows.Next() {
+		var delegationID, pID, delegatorActorID, delegateActorID string
+		var scopeB, signatureB []byte
+		var issuedAt, createdAt time.Time
+		var expiresAt *time.Time
+		if err := rows.Scan(&delegationID, &pID, &delegatorActorID, &delegateActorID, &scopeB, &issuedAt, &expiresAt, &signatureB, &createdAt); err != nil {
+			return nil, err
+		}
+		var scopeObj any
+		var signatureObj any
+		_ = json.Unmarshal(scopeB, &scopeObj)
+		_ = json.Unmarshal(signatureB, &signatureObj)
+		row := map[string]any{
+			"delegation_id":      delegationID,
+			"principal_id":       pID,
+			"delegator_actor_id": delegatorActorID,
+			"delegate_actor_id":  delegateActorID,
+			"scope":              scopeObj,
+			"issued_at":          issuedAt.UTC().Format(time.RFC3339),
+			"signature":          signatureObj,
+			"created_at":         createdAt.UTC().Format(time.RFC3339),
+		}
+		if expiresAt != nil {
+			row["expires_at"] = expiresAt.UTC().Format(time.RFC3339)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListApprovalDecisionsForEvidence(ctx context.Context, contractID string) ([]map[string]any, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT ad.approval_request_id,ad.actor_id,ad.decision,ad.decided_at,ad.signed_payload,ad.signed_payload_hash,ad.signature_type,ad.signature_object
+FROM approval_decisions ad
+JOIN approval_requests ar ON ar.approval_request_id=ad.approval_request_id
+WHERE ar.contract_id=$1
+ORDER BY ad.decided_at ASC, ad.approval_request_id ASC, ad.actor_id ASC
+`, contractID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		//var approvalRequestID, actorID, decision, decidedAt, signedPayloadHash, signatureType string
+		var approvalRequestID, actorID, decision, signedPayloadHash, signatureType string
+		var decidedAt *time.Time
+		var signedPayloadB, signatureObjB []byte
+		if err := rows.Scan(&approvalRequestID, &actorID, &decision, &decidedAt, &signedPayloadB, &signedPayloadHash, &signatureType, &signatureObjB); err != nil {
+			return nil, err
+		}
+		var signedPayloadObj any
+		var signatureObj any
+		_ = json.Unmarshal(signedPayloadB, &signedPayloadObj)
+		_ = json.Unmarshal(signatureObjB, &signatureObj)
+		/*
+		out = append(out, map[string]any{
+			"approval_request_id": approvalRequestID,
+			"actor_id":            actorID,
+			"decision":            decision,
+			"decided_at":          decidedAt,
+			"signed_payload":      signedPayloadObj,
+			"signed_payload_hash": signedPayloadHash,
+			"signature_type":      signatureType,
+			"signature_object":    signatureObj,
+		})
+		*/
+		row := map[string]any{
+		  "approval_request_id": approvalRequestID,
+		  "actor_id":            actorID,
+		  "decision":            decision,
+		  "signed_payload":      signedPayloadObj,
+		  "signed_payload_hash": signedPayloadHash,
+		  "signature_type":      signatureType,
+		  "signature_object":    signatureObj,
+		}
+
+		if decidedAt != nil {
+		  row["decided_at"] = decidedAt.UTC().Format(time.RFC3339)
+		} else {
+		  row["decided_at"] = nil
+		}
+
+		out = append(out, row)
+
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ListApprovalRequestsForHash(ctx context.Context, contractID string) ([]map[string]any, error) {

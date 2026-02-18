@@ -33,6 +33,34 @@ export type Contract = {
     raw: Record<string, unknown>;
 };
 export type Evidence = Record<string, unknown>;
+export type ContractEvidenceBundle = Record<string, unknown>;
+export type ContractRender = {
+    contract_id: string;
+    principal_id?: string;
+    template_id?: string;
+    template_version?: string;
+    contract_state?: string;
+    format?: 'text' | 'html';
+    locale?: string;
+    rendered: string;
+    render_hash: string;
+    packet_hash?: string;
+    variables_hash: string;
+    variables_snapshot?: Record<string, string>;
+    determinism_version?: string;
+    raw: Record<string, unknown>;
+};
+export type TemplateRender = {
+    template_id: string;
+    template_version: string;
+    format?: 'text' | 'html';
+    locale?: string;
+    rendered: string;
+    render_hash: string;
+    variables_hash: string;
+    determinism_version?: string;
+    raw: Record<string, unknown>;
+};
 export declare class ContractLaneError extends Error {
     status_code: number;
     error_code?: string;
@@ -93,6 +121,20 @@ export declare class ContractLaneClient {
     contractAction(contractId: string, action: string, body: Record<string, unknown> | undefined, idempotencyKey?: string): Promise<ActionResult>;
     getContract(contractId: string): Promise<Contract>;
     evidence(gateKey: string, externalSubjectId: string): Promise<Evidence>;
+    getContractEvidence(contractId: string, opts?: {
+        format?: 'json' | 'zip';
+        include?: Array<'render' | 'signatures' | 'approvals' | 'events' | 'variables'>;
+        redact?: 'none' | 'pii';
+    }): Promise<ContractEvidenceBundle>;
+    getContractRender(contractId: string, opts?: {
+        format?: 'text' | 'html';
+        locale?: string;
+        includeMeta?: boolean;
+    }): Promise<ContractRender>;
+    renderTemplate(templateId: string, version: string, variables: Record<string, string>, opts?: {
+        format?: 'text' | 'html';
+        locale?: string;
+    }): Promise<TemplateRender>;
     private parseGate;
     private request;
     private retryDelayMs;

@@ -76,6 +76,23 @@ type Contract struct {
 	Raw             map[string]any `json:"-"`
 }
 
+type ContractRender struct {
+	ContractID         string            `json:"contract_id"`
+	PrincipalID        string            `json:"principal_id,omitempty"`
+	TemplateID         string            `json:"template_id,omitempty"`
+	TemplateVersion    string            `json:"template_version,omitempty"`
+	ContractState      string            `json:"contract_state,omitempty"`
+	Format             string            `json:"format,omitempty"`
+	Locale             string            `json:"locale,omitempty"`
+	Rendered           string            `json:"rendered"`
+	RenderHash         string            `json:"render_hash"`
+	PacketHash         string            `json:"packet_hash,omitempty"`
+	VariablesHash      string            `json:"variables_hash"`
+	VariablesSnapshot  map[string]string `json:"variables_snapshot,omitempty"`
+	DeterminismVersion string            `json:"determinism_version,omitempty"`
+	Raw                map[string]any    `json:"-"`
+}
+
 type ResolveOptions struct {
 	ActorType       string
 	IdempotencyKey  string
@@ -242,6 +259,62 @@ func (c *Client) Evidence(ctx context.Context, gateKey, externalSubjectID string
 	return payload, nil
 }
 
+func (c *Client) GetContractEvidence(ctx context.Context, contractID, format string, include []string, redact string) (map[string]any, error) {
+	v := url.Values{}
+	if strings.TrimSpace(format) != "" {
+		v.Set("format", format)
+	}
+	if len(include) > 0 {
+		v.Set("include", strings.Join(include, ","))
+	}
+	if strings.TrimSpace(redact) != "" {
+		v.Set("redact", redact)
+	}
+	path := "/cel/contracts/" + url.PathEscape(contractID) + "/evidence"
+	if enc := v.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	return c.do(ctx, http.MethodGet, path, nil, nil, true)
+}
+
+func (c *Client) GetContractRender(ctx context.Context, contractID, format, locale string, includeMeta *bool) (*ContractRender, error) {
+	v := url.Values{}
+	if strings.TrimSpace(format) != "" {
+		v.Set("format", format)
+	}
+	if strings.TrimSpace(locale) != "" {
+		v.Set("locale", locale)
+	}
+	if includeMeta != nil {
+		if *includeMeta {
+			v.Set("include_meta", "true")
+		} else {
+			v.Set("include_meta", "false")
+		}
+	}
+	path := "/cel/contracts/" + url.PathEscape(contractID) + "/render"
+	if enc := v.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	payload, err := c.do(ctx, http.MethodGet, path, nil, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	return parseContractRender(payload), nil
+}
+
+func (c *Client) RenderTemplate(ctx context.Context, templateID, version string, variables map[string]string, format, locale string) (map[string]any, error) {
+	path := "/cel/templates/" + url.PathEscape(templateID) + "/versions/" + url.PathEscape(version) + "/render"
+	body := map[string]any{"variables": variables}
+	if strings.TrimSpace(format) != "" {
+		body["format"] = format
+	}
+	if strings.TrimSpace(locale) != "" {
+		body["locale"] = locale
+	}
+	return c.do(ctx, http.MethodPost, path, body, nil, true)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body any, headers map[string]string, retryable bool) (map[string]any, error) {
 	var bodyBytes []byte
 	if body != nil {
@@ -405,6 +478,31 @@ func parseContract(raw map[string]any) *Contract {
 	c.TemplateID, _ = raw["template_id"].(string)
 	c.TemplateVersion, _ = raw["template_version"].(string)
 	return c
+}
+
+func parseContractRender(raw map[string]any) *ContractRender {
+	cr := &ContractRender{Raw: raw}
+	cr.ContractID, _ = raw["contract_id"].(string)
+	cr.PrincipalID, _ = raw["principal_id"].(string)
+	cr.TemplateID, _ = raw["template_id"].(string)
+	cr.TemplateVersion, _ = raw["template_version"].(string)
+	cr.ContractState, _ = raw["contract_state"].(string)
+	cr.Format, _ = raw["format"].(string)
+	cr.Locale, _ = raw["locale"].(string)
+	cr.Rendered, _ = raw["rendered"].(string)
+	cr.RenderHash, _ = raw["render_hash"].(string)
+	cr.PacketHash, _ = raw["packet_hash"].(string)
+	cr.VariablesHash, _ = raw["variables_hash"].(string)
+	cr.DeterminismVersion, _ = raw["determinism_version"].(string)
+	if s, ok := raw["variables_snapshot"].(map[string]any); ok {
+		cr.VariablesSnapshot = map[string]string{}
+		for k, v := range s {
+			if sv, ok := v.(string); ok {
+				cr.VariablesSnapshot[k] = sv
+			}
+		}
+	}
+	return cr
 }
 
 func canonicalJSON(v any) ([]byte, error) {

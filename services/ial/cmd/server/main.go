@@ -1,15 +1,21 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"contractlane/pkg/db"
+	"contractlane/pkg/domain"
+	"contractlane/pkg/evidencehash"
 	"contractlane/pkg/httpx"
 	"contractlane/services/ial/internal/store"
 
@@ -30,6 +36,132 @@ func main() {
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 
 	r.Route("/ial", func(api chi.Router) {
+		api.Post("/dev/bootstrap", func(w http.ResponseWriter, r *http.Request) {
+			if strings.ToLower(strings.TrimSpace(os.Getenv("IAL_DEV_BOOTSTRAP"))) != "true" {
+				httpx.WriteError(w, 404, "NOT_FOUND", "dev bootstrap disabled", nil)
+				return
+			}
+			principalID := strings.TrimSpace(os.Getenv("IAL_DEV_PRINCIPAL_ID"))
+			if principalID == "" {
+				principalID = "prn_dev_local"
+			}
+			principalName := strings.TrimSpace(os.Getenv("IAL_DEV_PRINCIPAL_NAME"))
+			if principalName == "" {
+				principalName = "Dev Principal"
+			}
+			principalJurisdiction := strings.TrimSpace(os.Getenv("IAL_DEV_PRINCIPAL_JURISDICTION"))
+			if principalJurisdiction == "" {
+				principalJurisdiction = "US"
+			}
+			principalTimezone := strings.TrimSpace(os.Getenv("IAL_DEV_PRINCIPAL_TIMEZONE"))
+			if principalTimezone == "" {
+				principalTimezone = "UTC"
+			}
+			agentID := strings.TrimSpace(os.Getenv("IAL_DEV_AGENT_ID"))
+			if agentID == "" {
+				agentID = "act_dev_local"
+			}
+			agentName := strings.TrimSpace(os.Getenv("IAL_DEV_AGENT_NAME"))
+			if agentName == "" {
+				agentName = "Dev Agent"
+			}
+			token := strings.TrimSpace(os.Getenv("IAL_DEV_TOKEN"))
+			if token == "" {
+				token = "agt_live_dev_local_token"
+			}
+			scopes := []string{
+				"cel.contracts:write",
+				"cel.approvals:decide",
+				"cel.approvals:route",
+				"cel.gates:read",
+				"cel.gates:resolve",
+				"exec.signatures:send",
+			}
+
+			p := store.Principal{
+				PrincipalID:  principalID,
+				Name:         principalName,
+				Jurisdiction: principalJurisdiction,
+				Timezone:     principalTimezone,
+			}
+			if err := st.UpsertPrincipal(r.Context(), p); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+
+			a := store.Actor{
+				ActorID:     agentID,
+				PrincipalID: principalID,
+				ActorType:   "AGENT",
+				Status:      "ACTIVE",
+				Name:        &agentName,
+				Roles:       scopes,
+			}
+			if err := st.UpsertAgent(r.Context(), a, store.HashToken(token), scopes); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+
+			termsTemplateID := strings.TrimSpace(os.Getenv("IAL_DEV_TERMS_TEMPLATE_ID"))
+			termsTemplateVersion := strings.TrimSpace(os.Getenv("IAL_DEV_TERMS_TEMPLATE_VERSION"))
+
+			if termsTemplateID == "" {
+				ref, err := st.FindDevTermsTemplate(r.Context())
+				if err != nil {
+					httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+					return
+				}
+				if ref != nil {
+					termsTemplateID = ref.TemplateID
+				}
+			}
+			if termsTemplateID == "" {
+				termsTemplateID = "tpl_terms_v1"
+			}
+			if termsTemplateVersion == "" {
+				termsTemplateVersion = parseTemplateVersion(termsTemplateID)
+				if termsTemplateVersion == "" {
+					termsTemplateVersion = "v1"
+				}
+			}
+			if err := st.UpsertTemplateAndGovernance(r.Context(), termsTemplateID, "TERMS", "Terms and Conditions (Dev)"); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			if err := st.UpsertComplianceProgramPublished(r.Context(), principalID, "terms_current", "STRICT_RECONSENT", termsTemplateID, termsTemplateVersion, agentID); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+
+			httpx.WriteJSON(w, 200, map[string]any{
+				"request_id": httpx.NewRequestID(),
+				"principal": map[string]any{
+					"principal_id": principalID,
+					"name":         principalName,
+					"jurisdiction": principalJurisdiction,
+					"timezone":     principalTimezone,
+				},
+				"agent": map[string]any{
+					"actor_id":     agentID,
+					"principal_id": principalID,
+					"actor_type":   "AGENT",
+					"name":         agentName,
+					"scopes":       scopes,
+				},
+				"compliance_program": map[string]any{
+					"program_key":                "terms_current",
+					"mode":                       "STRICT_RECONSENT",
+					"required_template_id":       termsTemplateID,
+					"required_template_version":  termsTemplateVersion,
+					"bootstrap_principal_id":     principalID,
+					"bootstrap_created_by_actor": agentID,
+				},
+				"credentials": map[string]any{
+					"token":      token,
+					"token_hint": "dev bootstrap token",
+				},
+			})
+		})
 
 		api.Post("/principals", func(w http.ResponseWriter, r *http.Request) {
 			var req struct {
@@ -353,6 +485,147 @@ func main() {
 			})
 		})
 
+		api.Post("/delegations", func(w http.ResponseWriter, r *http.Request) {
+			token, ok := parseBearer(r.Header.Get("Authorization"))
+			if !ok {
+				httpx.WriteError(w, 401, "UNAUTHORIZED", "bearer token required", nil)
+				return
+			}
+			caller, err := st.ResolveBearerIdentity(r.Context(), token)
+			if err != nil {
+				httpx.WriteError(w, 401, "UNAUTHORIZED", "invalid bearer token", nil)
+				return
+			}
+
+			var req struct {
+				PrincipalID      string                     `json:"principal_id"`
+				DelegatorActorID string                     `json:"delegator_actor_id"`
+				DelegateActorID  string                     `json:"delegate_actor_id"`
+				Scope            domain.DelegationScope     `json:"scope"`
+				ExpiresAt        *string                    `json:"expires_at"`
+				Signature        domain.DelegationSignature `json:"signature"`
+			}
+			if err := httpx.ReadJSON(r, &req); err != nil {
+				httpx.WriteError(w, 400, "BAD_JSON", err.Error(), nil)
+				return
+			}
+			if strings.TrimSpace(req.PrincipalID) != "" && req.PrincipalID != caller.PrincipalID {
+				httpx.WriteError(w, 403, "FORBIDDEN", "principal mismatch", nil)
+				return
+			}
+			if caller.ActorID != req.DelegatorActorID {
+				httpx.WriteError(w, 403, "FORBIDDEN", "delegator must match authenticated actor", nil)
+				return
+			}
+			delegator, err := st.GetActor(r.Context(), req.DelegatorActorID)
+			if err != nil || delegator.PrincipalID != caller.PrincipalID || delegator.ActorType != "HUMAN" {
+				httpx.WriteError(w, 403, "FORBIDDEN", "delegator must be active human in principal", nil)
+				return
+			}
+			delegate, err := st.GetActor(r.Context(), req.DelegateActorID)
+			if err != nil || delegate.PrincipalID != caller.PrincipalID || delegate.ActorType != "AGENT" {
+				httpx.WriteError(w, 400, "BAD_REQUEST", "delegate_actor_id must be an AGENT in principal", nil)
+				return
+			}
+			if err := validateDelegationScope(req.Scope); err != nil {
+				httpx.WriteError(w, 422, "INVALID_SCOPE", err.Error(), nil)
+				return
+			}
+			var expiresAt *time.Time
+			if req.ExpiresAt != nil && strings.TrimSpace(*req.ExpiresAt) != "" {
+				tm, err := time.Parse(time.RFC3339, strings.TrimSpace(*req.ExpiresAt))
+				if err != nil {
+					httpx.WriteError(w, 422, "INVALID_EXPIRES_AT", "expires_at must be RFC3339", nil)
+					return
+				}
+				u := tm.UTC()
+				expiresAt = &u
+			}
+			issuedAt := time.Now().UTC()
+			payload := buildDelegationCreatePayload(caller.PrincipalID, req.DelegatorActorID, req.DelegateActorID, req.Scope, expiresAt)
+			if err := verifyDelegationSignature(payload, req.Signature); err != nil {
+				httpx.WriteError(w, 401, "INVALID_SIGNATURE", err.Error(), nil)
+				return
+			}
+			rec := domain.DelegationRecord{
+				DelegationID:     "dlg_" + uuid.NewString(),
+				PrincipalID:      caller.PrincipalID,
+				DelegatorActorID: req.DelegatorActorID,
+				DelegateActorID:  req.DelegateActorID,
+				Scope:            req.Scope,
+				IssuedAt:         issuedAt,
+				ExpiresAt:        expiresAt,
+				Signature:        req.Signature,
+			}
+			if err := st.CreateDelegation(r.Context(), rec); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			httpx.WriteJSON(w, 201, map[string]any{
+				"request_id":    httpx.NewRequestID(),
+				"delegation_id": rec.DelegationID,
+				"status":        "CREATED",
+			})
+		})
+
+		api.Post("/delegations/{delegation_id}/revoke", func(w http.ResponseWriter, r *http.Request) {
+			token, ok := parseBearer(r.Header.Get("Authorization"))
+			if !ok {
+				httpx.WriteError(w, 401, "UNAUTHORIZED", "bearer token required", nil)
+				return
+			}
+			caller, err := st.ResolveBearerIdentity(r.Context(), token)
+			if err != nil {
+				httpx.WriteError(w, 401, "UNAUTHORIZED", "invalid bearer token", nil)
+				return
+			}
+			delegationID := chi.URLParam(r, "delegation_id")
+			rec, err := st.GetDelegation(r.Context(), delegationID)
+			if err != nil {
+				httpx.WriteError(w, 404, "NOT_FOUND", "delegation not found", nil)
+				return
+			}
+			if rec.PrincipalID != caller.PrincipalID {
+				httpx.WriteError(w, 403, "FORBIDDEN", "principal mismatch", nil)
+				return
+			}
+			if rec.DelegatorActorID != caller.ActorID {
+				httpx.WriteError(w, 403, "FORBIDDEN", "only delegator can revoke", nil)
+				return
+			}
+			var req struct {
+				RevokedAt *string                    `json:"revoked_at"`
+				Signature domain.DelegationSignature `json:"signature"`
+			}
+			if err := httpx.ReadJSON(r, &req); err != nil {
+				httpx.WriteError(w, 400, "BAD_JSON", err.Error(), nil)
+				return
+			}
+			revokedAt := time.Now().UTC()
+			if req.RevokedAt != nil && strings.TrimSpace(*req.RevokedAt) != "" {
+				tm, err := time.Parse(time.RFC3339, strings.TrimSpace(*req.RevokedAt))
+				if err != nil {
+					httpx.WriteError(w, 422, "INVALID_REVOKED_AT", "revoked_at must be RFC3339", nil)
+					return
+				}
+				revokedAt = tm.UTC()
+			}
+			payload := buildDelegationRevokePayload(rec.PrincipalID, rec.DelegationID, rec.DelegatorActorID, rec.DelegateActorID, revokedAt)
+			if err := verifyDelegationSignature(payload, req.Signature); err != nil {
+				httpx.WriteError(w, 401, "INVALID_SIGNATURE", err.Error(), nil)
+				return
+			}
+			if err := st.RevokeDelegation(r.Context(), delegationID, revokedAt); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			httpx.WriteJSON(w, 200, map[string]any{
+				"request_id":    httpx.NewRequestID(),
+				"delegation_id": delegationID,
+				"status":        "REVOKED",
+			})
+		})
+
 		// Signature verification backed by real human session when provided.
 		api.Post("/verify-signature", func(w http.ResponseWriter, r *http.Request) {
 			var req struct {
@@ -469,4 +742,100 @@ func parseBearer(authorization string) (string, bool) {
 		return "", false
 	}
 	return tok, true
+}
+
+func parseTemplateVersion(templateID string) string {
+	s := strings.TrimSpace(templateID)
+	if s == "" {
+		return ""
+	}
+	idx := strings.LastIndex(s, "_")
+	if idx == -1 || idx == len(s)-1 {
+		return ""
+	}
+	v := s[idx+1:]
+	if strings.HasPrefix(v, "v") {
+		return v
+	}
+	return ""
+}
+
+func validateDelegationScope(scope domain.DelegationScope) error {
+	if len(scope.Actions) == 0 {
+		return fmt.Errorf("scope.actions must not be empty")
+	}
+	allowed := map[string]struct{}{
+		"contract.execute": {},
+		"gate.resolve":     {},
+	}
+	for _, action := range scope.Actions {
+		if _, ok := allowed[action]; !ok {
+			return fmt.Errorf("unsupported scope action: %s", action)
+		}
+	}
+	switch strings.TrimSpace(scope.MaxRiskLevel) {
+	case "", "LOW", "MEDIUM", "HIGH":
+	default:
+		return fmt.Errorf("scope.max_risk_level must be LOW, MEDIUM, HIGH, or empty")
+	}
+	return nil
+}
+
+func verifyDelegationSignature(payload map[string]any, sig domain.DelegationSignature) error {
+	if strings.TrimSpace(sig.Algorithm) == "" || strings.TrimSpace(sig.SignedPayloadHash) == "" || strings.TrimSpace(sig.SignatureBytes) == "" {
+		return fmt.Errorf("signature.algorithm, signature.signed_payload_hash, and signature.signature_bytes are required")
+	}
+	if sig.Algorithm != "HMAC-SHA256" {
+		return fmt.Errorf("unsupported delegation signature algorithm")
+	}
+	hashHex, _, err := evidencehash.CanonicalSHA256(payload)
+	if err != nil {
+		return err
+	}
+	expectedPayloadHash := "sha256:" + hashHex
+	if sig.SignedPayloadHash != expectedPayloadHash {
+		return fmt.Errorf("signed_payload_hash mismatch")
+	}
+	secret := strings.TrimSpace(os.Getenv("IAL_DELEGATION_HMAC_SECRET"))
+	if secret == "" {
+		secret = "dev_delegation_secret"
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(sig.SignedPayloadHash))
+	expectedSig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(expectedSig), []byte(sig.SignatureBytes)) {
+		return fmt.Errorf("invalid delegation signature")
+	}
+	return nil
+}
+
+func buildDelegationCreatePayload(principalID, delegatorActorID, delegateActorID string, scope domain.DelegationScope, expiresAt *time.Time) map[string]any {
+	scopePayload := map[string]any{
+		"actions":        scope.Actions,
+		"templates":      scope.Templates,
+		"max_risk_level": scope.MaxRiskLevel,
+	}
+	payload := map[string]any{
+		"principal_id":       principalID,
+		"delegator_actor_id": delegatorActorID,
+		"delegate_actor_id":  delegateActorID,
+		"scope":              scopePayload,
+		"expires_at":         nil,
+		"delegation_version": "delegation-v1",
+	}
+	if expiresAt != nil {
+		payload["expires_at"] = expiresAt.UTC().Format(time.RFC3339)
+	}
+	return payload
+}
+
+func buildDelegationRevokePayload(principalID, delegationID, delegatorActorID, delegateActorID string, revokedAt time.Time) map[string]any {
+	return map[string]any{
+		"principal_id":       principalID,
+		"delegation_id":      delegationID,
+		"delegator_actor_id": delegatorActorID,
+		"delegate_actor_id":  delegateActorID,
+		"revoked_at":         revokedAt.UTC().Format(time.RFC3339),
+		"delegation_version": "delegation-v1",
+	}
 }

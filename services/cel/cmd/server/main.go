@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,10 +18,12 @@ import (
 	"contractlane/pkg/canonhash"
 	"contractlane/pkg/db"
 	"contractlane/pkg/domain"
+	"contractlane/pkg/evidencehash"
 	"contractlane/pkg/httpx"
 	"contractlane/services/cel/internal/execclient"
 	"contractlane/services/cel/internal/ialclient"
 	"contractlane/services/cel/internal/idempotency"
+	"contractlane/services/cel/internal/render"
 	"contractlane/services/cel/internal/store"
 
 	"github.com/go-chi/chi/v5"
@@ -122,6 +125,89 @@ func main() {
 				"template_gates":  gates,
 				"variables":       vars,
 				"protected_slots": []string{},
+			})
+		})
+
+		api.Post("/templates/{template_id}/versions/{version}/render", func(w http.ResponseWriter, r *http.Request) {
+			templateID := chi.URLParam(r, "template_id")
+			version := strings.TrimSpace(chi.URLParam(r, "version"))
+			agent, err := authn.AuthenticateAgentBearer(r.Context(), pool, r.Header.Get("Authorization"))
+			if err != nil {
+				httpx.WriteError(w, 401, "UNAUTHORIZED", "agent authentication required", nil)
+				return
+			}
+			if _, err := st.GetTemplate(r.Context(), templateID); err != nil {
+				httpx.WriteError(w, 404, "NOT_FOUND", "template not found", nil)
+				return
+			}
+			if enabled, err := st.IsTemplateEnabledForPrincipal(r.Context(), agent.PrincipalID, templateID); err == nil && !enabled {
+				httpx.WriteError(w, 404, "NOT_FOUND", "template not found", nil)
+				return
+			}
+			if expected := parseTemplateVersion(templateID); expected != "" && expected != version {
+				httpx.WriteError(w, 404, "NOT_FOUND", "template version not found", nil)
+				return
+			}
+
+			var req struct {
+				Variables map[string]string `json:"variables"`
+				Locale    string            `json:"locale"`
+				Format    string            `json:"format"`
+			}
+			if err := httpx.ReadJSON(r, &req); err != nil {
+				httpx.WriteError(w, 400, "BAD_JSON", err.Error(), nil)
+				return
+			}
+			if req.Variables == nil {
+				req.Variables = map[string]string{}
+			}
+			format := normalizeRenderFormat(req.Format)
+			if format == "" {
+				httpx.WriteError(w, 400, "BAD_REQUEST", "format must be text or html", nil)
+				return
+			}
+			locale := normalizeLocale(req.Locale)
+
+			tpl, err := st.GetTemplate(r.Context(), templateID)
+			if err != nil {
+				httpx.WriteError(w, 404, "NOT_FOUND", "template not found", nil)
+				return
+			}
+			defs, err := st.GetTemplateVars(r.Context(), templateID)
+			if err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			templateText := render.BuildCanonicalTemplateText(render.TemplateSpec{
+				TemplateID:      templateID,
+				TemplateVersion: version,
+				DisplayName:     tpl.DisplayName,
+				Variables:       defs,
+			})
+			out, missing, err := render.Render(templateText, req.Variables, defs, format)
+			if err != nil {
+				httpx.WriteError(w, 500, "RENDER_FAILED", err.Error(), nil)
+				return
+			}
+			if len(missing) > 0 {
+				httpx.WriteError(w, 422, "MISSING_REQUIRED_VARIABLES", "missing required variables for render", map[string]any{"missing_keys": missing})
+				return
+			}
+			varsHash, _, err := render.HashVariablesSnapshot(req.Variables)
+			if err != nil {
+				httpx.WriteError(w, 500, "RENDER_FAILED", err.Error(), nil)
+				return
+			}
+			httpx.WriteJSON(w, 200, map[string]any{
+				"request_id":          httpx.NewRequestID(),
+				"template_id":         templateID,
+				"template_version":    version,
+				"format":              format,
+				"locale":              locale,
+				"rendered":            out,
+				"render_hash":         render.HashRendered(out),
+				"variables_hash":      varsHash,
+				"determinism_version": render.DeterminismVersion,
 			})
 		})
 
@@ -395,7 +481,14 @@ func main() {
 				})
 				return
 			}
-			if !authn.HasScope(agent.Scopes, "cel.contracts:write") {
+			allowed, delegated, err := authn.HasScopeOrDelegation(r.Context(), pool, agent, "cel.contracts:write", authn.DelegationContext{
+				Capability: "gate.resolve",
+			})
+			if err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			if !allowed {
 				httpx.WriteJSON(w, 200, map[string]any{
 					"request_id": httpx.NewRequestID(),
 					"gate_key":   gateKey,
@@ -403,6 +496,12 @@ func main() {
 					"reason":     "INSUFFICIENT_SCOPE",
 				})
 				return
+			}
+			if delegated {
+				authn.LogAuthEvent(r.Context(), pool, "cel", "POST /cel/gates/{gate_key}/resolve", agent.PrincipalID, agent.ActorID, "DELEGATION_USED", map[string]any{
+					"capability": "gate.resolve",
+					"gate_key":   gateKey,
+				})
 			}
 			actor := actorContext{
 				PrincipalID:    agent.PrincipalID,
@@ -594,28 +693,34 @@ func main() {
 				httpx.WriteError(w, 404, "NOT_FOUND", "contract not found", nil)
 				return
 			}
-			externalSubjectID := ""
-			var subject *ialclient.Subject
-			if c.SubjectActorID != nil && *c.SubjectActorID != "" {
-				// Best-effort reverse lookup through gate endpoint semantics is not supported; return mapped actor only.
-				subject = &ialclient.Subject{
-					PrincipalID: c.PrincipalID,
-					ActorID:     *c.SubjectActorID,
-				}
+			format := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("format")))
+			if format == "" {
+				format = "json"
 			}
-			gateKey := ""
-			if c.GateKey != nil {
-				gateKey = *c.GateKey
+			if format != "json" {
+				httpx.WriteError(w, 400, "BAD_REQUEST", "format must be json", nil)
+				return
 			}
-			evidence, err := buildContractEvidence(r.Context(), st, ial, c, gateKey, externalSubjectID, subject)
+			redact := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("redact")))
+			if redact == "" {
+				redact = "none"
+			}
+			if redact != "none" && redact != "pii" {
+				httpx.WriteError(w, 422, "BAD_REDACT", "redact must be none or pii", nil)
+				return
+			}
+			include, err := parseEvidenceIncludeFlags(r.URL.Query().Get("include"))
+			if err != nil {
+				httpx.WriteError(w, 422, "BAD_INCLUDE", err.Error(), nil)
+				return
+			}
+			evidence, err := buildContractEvidenceBundle(r.Context(), st, ial, c, include, redact)
 			if err != nil {
 				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
 				return
 			}
-			httpx.WriteJSON(w, 200, map[string]any{
-				"request_id": httpx.NewRequestID(),
-				"evidence":   evidence,
-			})
+			evidence["request_id"] = httpx.NewRequestID()
+			httpx.WriteJSON(w, 200, evidence)
 		})
 
 		api.Post("/contracts", func(w http.ResponseWriter, r *http.Request) {
@@ -691,6 +796,118 @@ func main() {
 				return
 			}
 			httpx.WriteJSON(w, 200, map[string]any{"request_id": httpx.NewRequestID(), "contract": c})
+		})
+
+		api.Get("/contracts/{contract_id}/render", func(w http.ResponseWriter, r *http.Request) {
+			contractID := chi.URLParam(r, "contract_id")
+			agent, err := authn.AuthenticateAgentBearer(r.Context(), pool, r.Header.Get("Authorization"))
+			if err != nil {
+				httpx.WriteError(w, 401, "UNAUTHORIZED", "agent authentication required", nil)
+				return
+			}
+			c, err := st.GetContract(r.Context(), contractID)
+			if err != nil {
+				httpx.WriteError(w, 404, "NOT_FOUND", "contract not found", nil)
+				return
+			}
+			if c.PrincipalID != agent.PrincipalID {
+				httpx.WriteError(w, 403, "FORBIDDEN", "contract belongs to a different principal", nil)
+				return
+			}
+			if c.TemplateVersion == nil || strings.TrimSpace(*c.TemplateVersion) == "" {
+				httpx.WriteError(w, 409, "TEMPLATE_VERSION_UNRESOLVABLE", "contract has no resolvable template version", nil)
+				return
+			}
+			format := normalizeRenderFormat(r.URL.Query().Get("format"))
+			if format == "" {
+				httpx.WriteError(w, 400, "BAD_REQUEST", "format must be text or html", nil)
+				return
+			}
+			locale := normalizeLocale(r.URL.Query().Get("locale"))
+			includeMeta := true
+			if q := strings.TrimSpace(r.URL.Query().Get("include_meta")); q != "" {
+				v, err := strconv.ParseBool(q)
+				if err != nil {
+					httpx.WriteError(w, 400, "BAD_REQUEST", "include_meta must be boolean", nil)
+					return
+				}
+				includeMeta = v
+			}
+
+			tpl, err := st.GetTemplate(r.Context(), c.TemplateID)
+			if err != nil {
+				httpx.WriteError(w, 409, "TEMPLATE_VERSION_UNRESOLVABLE", "contract template not found", nil)
+				return
+			}
+			defs, err := st.GetTemplateVars(r.Context(), c.TemplateID)
+			if err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			valuesSlice, err := st.GetVariables(r.Context(), c.ContractID)
+			if err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			snapshot := map[string]string{}
+			for _, v := range valuesSlice {
+				snapshot[string(v.Key)] = v.Value
+			}
+			templateText := render.BuildCanonicalTemplateText(render.TemplateSpec{
+				TemplateID:      c.TemplateID,
+				TemplateVersion: *c.TemplateVersion,
+				DisplayName:     tpl.DisplayName,
+				Variables:       defs,
+			})
+			rendered, missing, err := render.Render(templateText, snapshot, defs, format)
+			if err != nil {
+				httpx.WriteError(w, 500, "RENDER_FAILED", err.Error(), nil)
+				return
+			}
+			if len(missing) > 0 {
+				httpx.WriteError(w, 422, "MISSING_REQUIRED_VARIABLES", "missing required variables for render", map[string]any{"missing_keys": missing})
+				return
+			}
+			varsHash, _, err := render.HashVariablesSnapshot(snapshot)
+			if err != nil {
+				httpx.WriteError(w, 500, "RENDER_FAILED", err.Error(), nil)
+				return
+			}
+
+			hashes, err := st.GetContractHashes(r.Context(), c.ContractID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					hashes, err = computeAndPersistContractHashes(r.Context(), st, ial, c.ContractID)
+					if err != nil {
+						httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+						return
+					}
+				} else {
+					httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+					return
+				}
+			}
+
+			resp := map[string]any{
+				"request_id":          httpx.NewRequestID(),
+				"contract_id":         c.ContractID,
+				"principal_id":        c.PrincipalID,
+				"template_id":         c.TemplateID,
+				"template_version":    *c.TemplateVersion,
+				"contract_state":      c.State,
+				"format":              format,
+				"locale":              locale,
+				"rendered":            rendered,
+				"render_hash":         render.HashRendered(rendered),
+				"packet_hash":         hashes["packet_hash"],
+				"variables_hash":      varsHash,
+				"generated_at":        time.Now().UTC().Format(time.RFC3339),
+				"determinism_version": render.DeterminismVersion,
+			}
+			if includeMeta {
+				resp["variables_snapshot"] = snapshot
+			}
+			httpx.WriteJSON(w, 200, resp)
 		})
 
 		api.Post("/contracts/{contract_id}/variables:bulkSet", func(w http.ResponseWriter, r *http.Request) {
@@ -1600,6 +1817,25 @@ func parseTemplateVersion(templateID string) string {
 	return ""
 }
 
+func normalizeRenderFormat(v string) string {
+	s := strings.TrimSpace(strings.ToLower(v))
+	if s == "" {
+		return "text"
+	}
+	if s == "text" || s == "html" {
+		return s
+	}
+	return ""
+}
+
+func normalizeLocale(v string) string {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return "en-US"
+	}
+	return s
+}
+
 func policyProfileToVarGov(pp *ialclient.PolicyProfile) domain.IdentityVariableGovernance {
 	rules := []domain.IdentityVarRule{}
 	for _, r := range pp.VariableRules {
@@ -1744,6 +1980,328 @@ func buildContractEvidence(
 		},
 	}
 	return evidence, nil
+}
+
+type evidenceIncludeSet struct {
+	render     bool
+	signatures bool
+	approvals  bool
+	events     bool
+	variables  bool
+}
+
+func parseEvidenceIncludeFlags(raw string) (evidenceIncludeSet, error) {
+	all := evidenceIncludeSet{render: true, signatures: true, approvals: true, events: true, variables: true}
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return all, nil
+	}
+	out := evidenceIncludeSet{}
+	for _, part := range strings.Split(s, ",") {
+		p := strings.TrimSpace(strings.ToLower(part))
+		if p == "" {
+			continue
+		}
+		switch p {
+		case "render":
+			out.render = true
+		case "signatures":
+			out.signatures = true
+		case "approvals":
+			out.approvals = true
+		case "events":
+			out.events = true
+		case "variables":
+			out.variables = true
+		default:
+			return evidenceIncludeSet{}, fmt.Errorf("invalid include flag: %s", p)
+		}
+	}
+	return out, nil
+}
+
+func buildContractEvidenceBundle(
+	ctx context.Context,
+	st *store.Store,
+	ial *ialclient.Client,
+	c store.Contract,
+	include evidenceIncludeSet,
+	redact string,
+) (map[string]any, error) {
+	hashes, err := st.GetContractHashes(ctx, c.ContractID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			hashes, err = computeAndPersistContractHashes(ctx, st, ial, c.ContractID)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
+	}
+
+	contractRecord := map[string]any{
+		"contract_id":         c.ContractID,
+		"principal_id":        c.PrincipalID,
+		"template_id":         c.TemplateID,
+		"template_version":    c.TemplateVersion,
+		"state":               c.State,
+		"risk_level":          c.RiskLevel,
+		"counterparty_name":   c.CounterpartyName,
+		"counterparty_email":  c.CounterpartyEmail,
+		"created_by_actor_id": c.CreatedBy,
+		"created_at":          c.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if redact == "pii" {
+		contractRecord["counterparty_email"] = "REDACTED"
+	}
+
+	tpl, err := st.GetTemplate(ctx, c.TemplateID)
+	if err != nil {
+		return nil, err
+	}
+	defs, err := st.GetTemplateVars(ctx, c.TemplateID)
+	if err != nil {
+		return nil, err
+	}
+	vars, err := st.GetVariables(ctx, c.ContractID)
+	if err != nil {
+		return nil, err
+	}
+	varSnapshot := map[string]string{}
+	for _, v := range vars {
+		varSnapshot[string(v.Key)] = v.Value
+	}
+	variablesHash, _, err := render.HashVariablesSnapshot(varSnapshot)
+	if err != nil {
+		return nil, err
+	}
+
+	templateVersion := ""
+	if c.TemplateVersion != nil {
+		templateVersion = *c.TemplateVersion
+	}
+	templateText := render.BuildCanonicalTemplateText(render.TemplateSpec{
+		TemplateID:      c.TemplateID,
+		TemplateVersion: templateVersion,
+		DisplayName:     tpl.DisplayName,
+		Variables:       defs,
+	})
+	renderedText, missing, err := render.Render(templateText, varSnapshot, defs, "text")
+	if err != nil {
+		return nil, err
+	}
+	renderArtifact := map[string]any{
+		"format":              "text",
+		"locale":              "en-US",
+		"rendered":            renderedText,
+		"render_hash":         render.HashRendered(renderedText),
+		"determinism_version": render.DeterminismVersion,
+	}
+	if len(missing) > 0 {
+		renderArtifact["rendered"] = ""
+		renderArtifact["render_hash"] = render.HashRendered("")
+		renderArtifact["missing_required_keys"] = missing
+	}
+
+	artifacts := map[string]any{
+		"contract_record": contractRecord,
+	}
+	if include.variables {
+		artifacts["variables_snapshot"] = map[string]any{
+			"variables":      varSnapshot,
+			"variables_hash": variablesHash,
+		}
+	}
+	if include.render {
+		artifacts["render"] = renderArtifact
+	}
+	if include.approvals {
+		reqs, err := st.ListApprovalRequestsForEvidence(ctx, c.ContractID)
+		if err != nil {
+			return nil, err
+		}
+		decisions, err := st.ListApprovalDecisionsForEvidence(ctx, c.ContractID)
+		if err != nil {
+			return nil, err
+		}
+		artifacts["approval_requests"] = reqs
+		artifacts["approval_decisions"] = decisions
+	}
+	if include.signatures {
+		envs, err := st.ListSignatureEnvelopesForEvidence(ctx, c.ContractID)
+		if err != nil {
+			return nil, err
+		}
+		artifacts["signature_envelopes"] = envs
+	}
+	if include.events {
+		evs, err := st.ListEvents(ctx, c.ContractID)
+		if err != nil {
+			return nil, err
+		}
+		artifacts["contract_events"] = evs
+	}
+	idem, err := st.ListIdempotencyRecordsForContract(ctx, c.PrincipalID, c.ContractID)
+	if err != nil {
+		return nil, err
+	}
+	artifacts["idempotency"] = idem
+	delegations, err := st.ListActiveDelegationsForEvidence(ctx, c.PrincipalID)
+	if err != nil {
+		return nil, err
+	}
+	artifacts["delegation_records"] = delegations
+
+	artifactList := make([]map[string]any, 0, len(artifacts))
+	for artifactType, payload := range artifacts {
+		hash, b, err := canonicalSHA256(payload)
+		if err != nil {
+			return nil, err
+		}
+		contentType := "application/json"
+		if artifactType == "render" {
+			contentType = "text/plain; charset=utf-8"
+			rendered := fmt.Sprint(renderArtifact["rendered"])
+			hash = render.HashRendered(rendered)
+			b = []byte(rendered)
+			_ = b
+		}
+		hashOf, hashRule := artifactHashSpec(artifactType)
+		artifactList = append(artifactList, map[string]any{
+			"artifact_type": artifactType,
+			"artifact_id":   artifactIDForType(artifactType, c.ContractID),
+			"sha256":        hash,
+			"content_type":  contentType,
+			"hash_of":       hashOf,
+			"hash_rule":     hashRule,
+		})
+	}
+	sort.Slice(artifactList, func(i, j int) bool {
+		ti := fmt.Sprint(artifactList[i]["artifact_type"])
+		tj := fmt.Sprint(artifactList[j]["artifact_type"])
+		if ti != tj {
+			return ti < tj
+		}
+		return fmt.Sprint(artifactList[i]["artifact_id"]) < fmt.Sprint(artifactList[j]["artifact_id"])
+	})
+	if err := validateEvidenceManifestCoverage(artifacts, artifactList); err != nil {
+		return nil, err
+	}
+
+	manifest := map[string]any{
+		"canonicalization": map[string]any{
+			"json":               "JCS-like sorted keys",
+			"newlines":           "\\n",
+			"encoding":           "utf-8",
+			"bundle_v":           "evidence-v1",
+			"manifest_hash_rule": "canonical_json_sorted_keys_v1",
+			"bundle_hash_rule":   "concat_artifact_hashes_v1",
+		},
+		"artifacts": artifactList,
+	}
+	manifestHash, _, err := evidencehash.CanonicalSHA256(manifest)
+	if err != nil {
+		return nil, err
+	}
+	bundleHash := evidencehash.ComputeBundleHashFromManifest("evidence-v1", c.ContractID, fmt.Sprint(hashes["packet_hash"]), artifactList)
+
+	return map[string]any{
+		"bundle_version": "evidence-v1",
+		"generated_at":   c.CreatedAt.UTC().Format(time.RFC3339),
+		"principal_id":   c.PrincipalID,
+		"contract": map[string]any{
+			"contract_id":         c.ContractID,
+			"state":               c.State,
+			"template_id":         c.TemplateID,
+			"template_version":    c.TemplateVersion,
+			"packet_hash":         hashes["packet_hash"],
+			"diff_hash":           hashes["diff_hash"],
+			"risk_hash":           hashes["risk_hash"],
+			"variables_hash":      variablesHash,
+			"determinism_version": "evidence-v1",
+		},
+		"hashes": map[string]any{
+			"bundle_hash":   "sha256:" + bundleHash,
+			"manifest_hash": "sha256:" + manifestHash,
+		},
+		"manifest":  manifest,
+		"artifacts": artifacts,
+	}, nil
+}
+
+func artifactIDForType(artifactType, contractID string) string {
+	switch artifactType {
+	case "contract_record":
+		return "contract:" + contractID
+	case "render":
+		return "render:text"
+	case "variables_snapshot":
+		return "variables:snapshot"
+	case "approval_requests":
+		return "approvals:requests"
+	case "approval_decisions":
+		return "approvals:decisions"
+	case "signature_envelopes":
+		return "signatures:envelopes"
+	case "contract_events":
+		return "events:contract"
+	case "idempotency":
+		return "idempotency:records"
+	case "delegation_records":
+		return "delegations:active"
+	default:
+		return artifactType
+	}
+}
+
+func artifactHashSpec(artifactType string) (hashOf, hashRule string) {
+	switch artifactType {
+	case "render":
+		return "artifacts.render.rendered", "utf8_v1"
+	default:
+		return "artifacts." + artifactType, "canonical_json_sorted_keys_v1"
+	}
+}
+
+func validateEvidenceManifestCoverage(artifacts map[string]any, artifactList []map[string]any) error {
+	covered := make(map[string]struct{}, len(artifactList))
+	for _, descriptor := range artifactList {
+		artifactType := strings.TrimSpace(fmt.Sprint(descriptor["artifact_type"]))
+		if artifactType == "" {
+			return errors.New("artifact descriptor missing artifact_type")
+		}
+		if _, ok := artifacts[artifactType]; !ok {
+			return fmt.Errorf("artifact descriptor references unknown artifact_type: %s", artifactType)
+		}
+		if _, exists := covered[artifactType]; exists {
+			return fmt.Errorf("duplicate artifact descriptor for artifact_type: %s", artifactType)
+		}
+		hashOf := strings.TrimSpace(fmt.Sprint(descriptor["hash_of"]))
+		hashRule := strings.TrimSpace(fmt.Sprint(descriptor["hash_rule"]))
+		if hashOf == "" || hashRule == "" {
+			return fmt.Errorf("artifact descriptor missing hash metadata for artifact_type: %s", artifactType)
+		}
+		expectedHashOf, expectedHashRule := artifactHashSpec(artifactType)
+		if hashOf != expectedHashOf || hashRule != expectedHashRule {
+			return fmt.Errorf("artifact descriptor hash metadata mismatch for artifact_type: %s", artifactType)
+		}
+		covered[artifactType] = struct{}{}
+	}
+	for artifactType := range artifacts {
+		if _, ok := covered[artifactType]; !ok {
+			return fmt.Errorf("artifact missing manifest descriptor: %s", artifactType)
+		}
+	}
+	return nil
+}
+
+func computeBundleHashFromManifest(bundleVersion, contractID, packetHash string, artifacts []map[string]any) string {
+	return evidencehash.ComputeBundleHashFromManifest(bundleVersion, contractID, packetHash, artifacts)
+}
+
+func canonicalSHA256(v any) (hexHash string, bytes []byte, err error) {
+	return evidencehash.CanonicalSHA256(v)
 }
 
 func ensureGateContractAndSignature(
@@ -1982,10 +2540,56 @@ func requireAgentScope(r *http.Request, w http.ResponseWriter, pool *pgxpool.Poo
 		httpx.WriteError(w, 403, "FORBIDDEN", "token actor does not match actor_context", nil)
 		return false
 	}
-	if !authn.HasScope(agent.Scopes, requiredScope) {
+	dctx, hasDelegationContext, err := delegationContextForEndpoint(r.Context(), pool, endpoint, actor.PrincipalID)
+	if err != nil {
+		httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+		return false
+	}
+	allowed, delegated, err := authn.HasScopeOrDelegation(r.Context(), pool, agent, requiredScope, dctx)
+	if err != nil {
+		httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+		return false
+	}
+	if !allowed {
 		authn.LogAuthFailure(r.Context(), pool, "cel", endpoint, actor.PrincipalID, actor.ActorID, "INSUFFICIENT_SCOPE", map[string]any{"required_scope": requiredScope})
 		httpx.WriteError(w, 403, "INSUFFICIENT_SCOPE", "agent lacks required scope", map[string]any{"required_scope": requiredScope})
 		return false
 	}
+	if delegated {
+		details := map[string]any{
+			"required_scope": requiredScope,
+			"capability":     dctx.Capability,
+		}
+		if hasDelegationContext {
+			details["template_id"] = dctx.TemplateID
+			details["risk_level"] = dctx.RiskLevel
+		}
+		authn.LogAuthEvent(r.Context(), pool, "cel", endpoint, actor.PrincipalID, actor.ActorID, "DELEGATION_USED", details)
+	}
 	return true
+}
+
+func delegationContextForEndpoint(ctx context.Context, pool *pgxpool.Pool, endpoint, principalID string) (authn.DelegationContext, bool, error) {
+	parts := strings.Split(endpoint, "/")
+	// Expected endpoint shape: POST /cel/contracts/{contract_id}/actions/{action}
+	if len(parts) >= 6 && parts[1] == "cel" && parts[2] == "contracts" && parts[4] == "actions" {
+		contractID := strings.TrimSpace(parts[3])
+		var templateID string
+		var riskLevel string
+		err := pool.QueryRow(ctx, `
+SELECT template_id,risk_level
+FROM contracts
+WHERE contract_id=$1 AND principal_id=$2
+`, contractID, principalID).Scan(&templateID, &riskLevel)
+		if err == nil {
+			return authn.DelegationContext{
+				Capability: "contract.execute",
+				TemplateID: templateID,
+				RiskLevel:  riskLevel,
+			}, true, nil
+		}
+		// Treat missing contract metadata as no delegation context.
+		return authn.DelegationContext{}, false, nil
+	}
+	return authn.DelegationContext{}, false, nil
 }

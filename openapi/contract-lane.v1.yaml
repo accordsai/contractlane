@@ -74,6 +74,92 @@ components:
         state: { type: string }
         template_id: { type: string }
         template_version: { type: string }
+    RenderFormat:
+      type: string
+      enum: [text, html]
+    ContractRenderResponse:
+      type: object
+      required: [contract_id, principal_id, template_id, template_version, contract_state, format, locale, rendered, render_hash, packet_hash, variables_hash, generated_at, determinism_version]
+      properties:
+        contract_id: { type: string }
+        principal_id: { type: string }
+        template_id: { type: string }
+        template_version: { type: string }
+        contract_state: { type: string }
+        format: { $ref: '#/components/schemas/RenderFormat' }
+        locale: { type: string }
+        rendered: { type: string }
+        render_hash: { type: string }
+        packet_hash: { type: string }
+        variables_hash: { type: string }
+        variables_snapshot:
+          type: object
+          additionalProperties: { type: string }
+        generated_at: { type: string, format: date-time }
+        determinism_version: { type: string }
+    TemplateRenderRequest:
+      type: object
+      properties:
+        variables:
+          type: object
+          additionalProperties: { type: string }
+        locale: { type: string }
+        format: { $ref: '#/components/schemas/RenderFormat' }
+    TemplateRenderResponse:
+      type: object
+      required: [template_id, template_version, format, locale, rendered, render_hash, variables_hash, determinism_version]
+      properties:
+        template_id: { type: string }
+        template_version: { type: string }
+        format: { $ref: '#/components/schemas/RenderFormat' }
+        locale: { type: string }
+        rendered: { type: string }
+        render_hash: { type: string }
+        variables_hash: { type: string }
+        determinism_version: { type: string }
+    ArtifactDescriptor:
+      type: object
+      required: [artifact_type, artifact_id, sha256, content_type, hash_of, hash_rule]
+      properties:
+        artifact_type: { type: string }
+        artifact_id: { type: string }
+        sha256: { type: string }
+        content_type: { type: string }
+        hash_of:
+          type: string
+          description: JSON path indicating exactly which response field bytes were hashed.
+        hash_rule:
+          type: string
+          enum: [utf8_v1, canonical_json_sorted_keys_v1]
+          description: Hashing rule used to compute sha256 for the artifact.
+    EvidenceManifest:
+      type: object
+      properties:
+        canonicalization:
+          type: object
+          additionalProperties: true
+        artifacts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArtifactDescriptor'
+    EvidenceBundleV1:
+      type: object
+      properties:
+        bundle_version: { type: string }
+        generated_at: { type: string, format: date-time }
+        principal_id: { type: string }
+        contract:
+          type: object
+          additionalProperties: true
+        hashes:
+          type: object
+          additionalProperties: true
+        manifest:
+          $ref: '#/components/schemas/EvidenceManifest'
+        artifacts:
+          type: object
+          additionalProperties: true
+        request_id: { type: string }
 paths:
   /cel/gates/{gate_key}/status:
     get:
@@ -199,6 +285,118 @@ paths:
                 properties:
                   contract:
                     $ref: '#/components/schemas/Contract'
+        '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { description: Unauthorized, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Forbidden, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '409': { description: Conflict, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Unprocessable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { description: Rate limit, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '500': { description: Internal error, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /cel/contracts/{id}/render:
+    get:
+      operationId: getContractRender
+      security:
+        - PrincipalBearerAuth: []
+        - AgentHmacAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: format
+          required: false
+          schema: { $ref: '#/components/schemas/RenderFormat' }
+        - in: query
+          name: locale
+          required: false
+          schema: { type: string }
+        - in: query
+          name: include_meta
+          required: false
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: Contract render
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ContractRenderResponse' }
+        '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { description: Unauthorized, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Forbidden, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '409': { description: Conflict, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Unprocessable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { description: Rate limit, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '500': { description: Internal error, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /cel/contracts/{id}/evidence:
+    get:
+      operationId: getContractEvidence
+      security:
+        - PrincipalBearerAuth: []
+        - AgentHmacAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: format
+          required: false
+          schema:
+            type: string
+            enum: [json, zip]
+        - in: query
+          name: include
+          required: false
+          schema: { type: string }
+        - in: query
+          name: redact
+          required: false
+          schema:
+            type: string
+            enum: [none, pii]
+      responses:
+        '200':
+          description: Evidence bundle
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EvidenceBundleV1' }
+        '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '401': { description: Unauthorized, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '403': { description: Forbidden, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '409': { description: Conflict, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '422': { description: Unprocessable, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '429': { description: Rate limit, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+        '500': { description: Internal error, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+  /cel/templates/{template_id}/versions/{version}/render:
+    post:
+      operationId: renderTemplate
+      security:
+        - PrincipalBearerAuth: []
+        - AgentHmacAuth: []
+      parameters:
+        - in: path
+          name: template_id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: version
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TemplateRenderRequest' }
+      responses:
+        '200':
+          description: Template render
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TemplateRenderResponse' }
         '400': { description: Bad request, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '401': { description: Unauthorized, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
         '403': { description: Forbidden, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
