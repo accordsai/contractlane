@@ -1,0 +1,8 @@
+{
+  "name": "proof_bundle_v1_offline_verify_ok",
+  "description": "Offline verifier accepts exported proof-bundle-v1 when untouched.",
+  "requires": [
+    "GET /cel/contracts/{contract_id}/proof-bundle?format=json",
+    "go run ./conformance/runner/helpers/proofbundle/main.go verify"
+  ]
+}

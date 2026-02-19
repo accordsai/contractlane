@@ -1,0 +1,8 @@
+{
+  "name": "proof_bundle_v1_tamper_fails",
+  "description": "Tampering proof-bundle-v1 content causes offline verification failure.",
+  "requires": [
+    "GET /cel/contracts/{contract_id}/proof-bundle?format=json",
+    "go run ./conformance/runner/helpers/proofbundle/main.go verify"
+  ]
+}

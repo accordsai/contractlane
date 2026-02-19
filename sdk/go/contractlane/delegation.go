@@ -32,6 +32,7 @@ const (
 	DelegationFailureSignatureInvalid  = "delegation_signature_invalid"
 	DelegationFailureExpired           = "delegation_expired"
 	DelegationFailureAmountExceeded    = "delegation_amount_exceeded"
+	DelegationFailureRevoked           = "delegation_revoked"
 )
 
 var knownDelegationScopes = map[string]struct{}{

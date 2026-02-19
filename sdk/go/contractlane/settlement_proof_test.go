@@ -246,6 +246,150 @@ func TestVerifySettlementProofV1_AuthorizationAmountExceededFails(t *testing.T) 
 	}
 }
 
+func TestVerifySettlementProofV1_AuthorizationRevokedFails(t *testing.T) {
+	artifacts := sampleOfflineArtifacts(t)
+	ds := artifacts["delegations"].([]SignedDelegationV1)
+	target := ds[0].Delegation
+	issuerPriv := ed25519.NewKeyFromSeed(bytesRepeat(21, 32))
+	revPayload := DelegationRevocationV1{
+		Version:      "delegation-revocation-v1",
+		RevocationID: "rev_test_" + target.DelegationID,
+		DelegationID: target.DelegationID,
+		IssuerAgent:  target.IssuerAgent,
+		Nonce:        "cmV2b2NhdGlvbl9ub25jZQ",
+		IssuedAt:     "2026-02-20T12:30:00Z",
+	}
+	revSig, err := SignDelegationRevocationV1(revPayload, issuerPriv, time.Date(2026, 2, 20, 12, 30, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("SignDelegationRevocationV1: %v", err)
+	}
+	artifacts["delegation_revocations"] = []SignedDelegationRevocationV1{
+		{Revocation: revPayload, IssuerSignature: revSig},
+	}
+	evidenceBytes, err := BuildOfflineEvidenceBundle(artifacts)
+	if err != nil {
+		t.Fatalf("BuildOfflineEvidenceBundle: %v", err)
+	}
+	_, proofBytes, err := BuildSettlementProofV1(evidenceBytes, BuildSettlementProofV1Options{
+		ContractID:  "ctr_offline_reference",
+		IntentID:    "ci_a",
+		IssuedAtUTC: "2026-02-18T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("BuildSettlementProofV1: %v", err)
+	}
+	err = VerifySettlementProofV1(evidenceBytes, proofBytes)
+	if err == nil || !strings.Contains(err.Error(), DelegationFailureRevoked) {
+		t.Fatalf("expected %s, got %v", DelegationFailureRevoked, err)
+	}
+}
+
+func TestVerifySettlementProofV1_RulesRequireSettlementPaidPasses(t *testing.T) {
+	evidencePath, proofPath := settlementFixturePaths(t)
+	evidenceBytes, _ := os.ReadFile(evidencePath)
+	proofBytes, _ := os.ReadFile(proofPath)
+
+	var proof SettlementProofV1
+	if err := json.Unmarshal(proofBytes, &proof); err != nil {
+		t.Fatalf("unmarshal proof: %v", err)
+	}
+	proof.Requirements = &SettlementProofRequirements{
+		Rules: &RulesV1{
+			Version: "rules-v1",
+			Rules: []RuleV1Item{
+				{
+					RuleID: "rl_paid",
+					When:   mustPredicate(t, map[string]any{"has_commerce_intent": true}),
+					Then: RuleEffectV1{
+						Require: &RuleRequireEffectV1{
+							Name:      "settlement_paid",
+							Predicate: mustPredicate(t, map[string]any{"settlement_status_is": "PAID"}),
+						},
+					},
+				},
+			},
+		},
+	}
+	updated, _ := json.Marshal(proof)
+	if err := VerifySettlementProofV1(evidenceBytes, updated); err != nil {
+		t.Fatalf("expected rules require settlement paid to pass: %v", err)
+	}
+}
+
+func TestVerifySettlementProofV1_RulesRequireSettlementPaidFails(t *testing.T) {
+	evidencePath, proofPath := settlementFixturePaths(t)
+	evidenceBytes, _ := os.ReadFile(evidencePath)
+	proofBytes, _ := os.ReadFile(proofPath)
+
+	var proof SettlementProofV1
+	if err := json.Unmarshal(proofBytes, &proof); err != nil {
+		t.Fatalf("unmarshal proof: %v", err)
+	}
+	proof.Requirements = &SettlementProofRequirements{
+		Rules: &RulesV1{
+			Version: "rules-v1",
+			Rules: []RuleV1Item{
+				{
+					RuleID: "rl_paid_fail",
+					When:   mustPredicate(t, map[string]any{"has_commerce_intent": true}),
+					Then: RuleEffectV1{
+						Require: &RuleRequireEffectV1{
+							Name:      "settlement_paid",
+							Predicate: mustPredicate(t, map[string]any{"settlement_status_is": "DISPUTED"}),
+						},
+					},
+				},
+			},
+		},
+	}
+	updated, _ := json.Marshal(proof)
+	err := VerifySettlementProofV1(evidenceBytes, updated)
+	if err == nil || !strings.Contains(err.Error(), "rules_requirement_failed") {
+		t.Fatalf("expected rules_requirement_failed, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "rule_id=rl_paid_fail") || !strings.Contains(err.Error(), "require=settlement_paid") || !strings.Contains(err.Error(), "failure_reason=status_mismatch") {
+		t.Fatalf("expected deterministic rules failure detail, got %v", err)
+	}
+}
+
+func TestVerifySettlementProofV1_RulesRequireAmountMatchFails(t *testing.T) {
+	evidencePath, proofPath := settlementFixturePaths(t)
+	evidenceBytes, _ := os.ReadFile(evidencePath)
+	proofBytes, _ := os.ReadFile(proofPath)
+
+	var proof SettlementProofV1
+	if err := json.Unmarshal(proofBytes, &proof); err != nil {
+		t.Fatalf("unmarshal proof: %v", err)
+	}
+	proof.Requirements = &SettlementProofRequirements{
+		Rules: &RulesV1{
+			Version: "rules-v1",
+			Rules: []RuleV1Item{
+				{
+					RuleID: "rl_amount_fail",
+					When:   mustPredicate(t, map[string]any{"has_commerce_intent": true}),
+					Then: RuleEffectV1{
+						Require: &RuleRequireEffectV1{
+							Name: "amount_match",
+							Predicate: mustPredicate(t, map[string]any{
+								"settlement_amount_is": map[string]any{"currency": "USD", "amount": "999"},
+							}),
+						},
+					},
+				},
+			},
+		},
+	}
+	updated, _ := json.Marshal(proof)
+	err := VerifySettlementProofV1(evidenceBytes, updated)
+	if err == nil || !strings.Contains(err.Error(), "rules_requirement_failed") {
+		t.Fatalf("expected rules_requirement_failed, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "rule_id=rl_amount_fail") || !strings.Contains(err.Error(), "require=amount_match") || !strings.Contains(err.Error(), "failure_reason=amount_mismatch") {
+		t.Fatalf("expected deterministic amount_mismatch rules detail, got %v", err)
+	}
+}
+
 func TestBuildSettlementProofV1_Deterministic(t *testing.T) {
 	evidencePath, _ := settlementFixturePaths(t)
 	evidenceBytes, err := os.ReadFile(evidencePath)
@@ -329,4 +473,17 @@ func settlementFixturePaths(t *testing.T) (evidencePath, proofPath string) {
 	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", "..", ".."))
 	fixtureDir := filepath.Join(root, "conformance", "fixtures", "agent-commerce-offline")
 	return filepath.Join(fixtureDir, "evidence.json"), filepath.Join(fixtureDir, "settlement_proof.json")
+}
+
+func mustPredicate(t *testing.T, v any) PredicateV1 {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal predicate: %v", err)
+	}
+	var p PredicateV1
+	if err := json.Unmarshal(b, &p); err != nil {
+		t.Fatalf("unmarshal predicate: %v", err)
+	}
+	return p
 }

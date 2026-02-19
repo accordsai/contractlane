@@ -1,0 +1,8 @@
+{
+  "name": "hosted_commerce_intent_roundtrip",
+  "description": "POST /commerce/intents succeeds and evidence includes commerce_intents artifact; EVP verification remains valid.",
+  "requires": [
+    "POST /commerce/intents",
+    "GET /cel/contracts/{id}/evidence?format=json"
+  ]
+}

@@ -635,6 +635,204 @@ func (s *Store) ListEvents(ctx context.Context, contractID string) ([]map[string
 	return out, rows.Err()
 }
 
+func (s *Store) UpsertCommerceIntentArtifact(ctx context.Context, contractID, actorID, intentHash string, payload map[string]any) error {
+	var exists bool
+	err := s.DB.QueryRow(ctx, `
+SELECT EXISTS(
+  SELECT 1
+  FROM contract_events
+  WHERE contract_id=$1
+    AND type='COMMERCE_INTENT_ACCEPTED'
+    AND payload->>'intent_hash'=$2
+)
+`, contractID, intentHash).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	return s.AddEvent(ctx, contractID, "COMMERCE_INTENT_ACCEPTED", actorID, payload)
+}
+
+func (s *Store) UpsertCommerceAcceptArtifact(ctx context.Context, contractID, actorID, acceptHash string, payload map[string]any) error {
+	var exists bool
+	err := s.DB.QueryRow(ctx, `
+SELECT EXISTS(
+  SELECT 1
+  FROM contract_events
+  WHERE contract_id=$1
+    AND type='COMMERCE_ACCEPT_ACCEPTED'
+    AND payload->>'accept_hash'=$2
+)
+`, contractID, acceptHash).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	return s.AddEvent(ctx, contractID, "COMMERCE_ACCEPT_ACCEPTED", actorID, payload)
+}
+
+func (s *Store) CommerceIntentHashExists(ctx context.Context, contractID, intentHash string) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRow(ctx, `
+SELECT EXISTS(
+  SELECT 1
+  FROM contract_events
+  WHERE contract_id=$1
+    AND type='COMMERCE_INTENT_ACCEPTED'
+    AND payload->>'intent_hash'=$2
+)
+`, contractID, intentHash).Scan(&exists)
+	return exists, err
+}
+
+func (s *Store) ListCommerceIntentsForEvidence(ctx context.Context, contractID string) ([]map[string]any, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT payload
+FROM contract_events
+WHERE contract_id=$1
+  AND type='COMMERCE_INTENT_ACCEPTED'
+ORDER BY payload->>'intent_hash' ASC, event_id ASC
+`, contractID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]map[string]any, 0)
+	for rows.Next() {
+		var payloadB []byte
+		if err := rows.Scan(&payloadB); err != nil {
+			return nil, err
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(payloadB, &payload); err != nil {
+			return nil, err
+		}
+		intent, _ := payload["intent"].(map[string]any)
+		sig, _ := payload["buyer_signature"].(map[string]any)
+		if intent == nil || sig == nil {
+			continue
+		}
+		out = append(out, map[string]any{
+			"intent":          intent,
+			"buyer_signature": sig,
+		})
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListCommerceAcceptsForEvidence(ctx context.Context, contractID string) ([]map[string]any, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT payload
+FROM contract_events
+WHERE contract_id=$1
+  AND type='COMMERCE_ACCEPT_ACCEPTED'
+ORDER BY payload->>'accept_hash' ASC, event_id ASC
+`, contractID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]map[string]any, 0)
+	for rows.Next() {
+		var payloadB []byte
+		if err := rows.Scan(&payloadB); err != nil {
+			return nil, err
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(payloadB, &payload); err != nil {
+			return nil, err
+		}
+		accept, _ := payload["accept"].(map[string]any)
+		sig, _ := payload["seller_signature"].(map[string]any)
+		if accept == nil || sig == nil {
+			continue
+		}
+		out = append(out, map[string]any{
+			"accept":           accept,
+			"seller_signature": sig,
+		})
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListCommerceDelegationsForAuthorization(ctx context.Context, contractID string) ([]map[string]any, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT payload
+FROM contract_events
+WHERE contract_id=$1
+  AND type='COMMERCE_DELEGATION'
+ORDER BY payload->'delegation'->>'delegation_id' ASC, event_id ASC
+`, contractID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]map[string]any, 0)
+	for rows.Next() {
+		var payloadB []byte
+		if err := rows.Scan(&payloadB); err != nil {
+			return nil, err
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(payloadB, &payload); err != nil {
+			return nil, err
+		}
+		delegation, _ := payload["delegation"].(map[string]any)
+		sig, _ := payload["issuer_signature"].(map[string]any)
+		if delegation == nil || sig == nil {
+			continue
+		}
+		out = append(out, map[string]any{
+			"delegation":       delegation,
+			"issuer_signature": sig,
+		})
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListCommerceDelegationRevocationsForAuthorization(ctx context.Context, contractID string) ([]map[string]any, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT payload
+FROM contract_events
+WHERE contract_id=$1
+  AND type='COMMERCE_DELEGATION_REVOCATION'
+ORDER BY payload->>'revocation_hash' ASC, event_id ASC
+`, contractID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]map[string]any, 0)
+	for rows.Next() {
+		var payloadB []byte
+		if err := rows.Scan(&payloadB); err != nil {
+			return nil, err
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(payloadB, &payload); err != nil {
+			return nil, err
+		}
+		revocation, _ := payload["revocation"].(map[string]any)
+		sig, _ := payload["issuer_signature"].(map[string]any)
+		if revocation == nil || sig == nil {
+			continue
+		}
+		row := map[string]any{
+			"revocation":       revocation,
+			"issuer_signature": sig,
+		}
+		if h := strings.TrimSpace(fmt.Sprint(payload["revocation_hash"])); h != "" {
+			row["revocation_hash"] = h
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetIdempotencyRecord(ctx context.Context, principalID, actorID, idempotencyKey, endpoint string) (int, map[string]any, bool, error) {
 	var status int
 	var body []byte

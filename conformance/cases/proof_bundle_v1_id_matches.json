@@ -1,0 +1,8 @@
+{
+  "name": "proof_bundle_v1_id_matches",
+  "description": "proof_id equals sha256(canonical_json(proof-bundle-v1)) computed offline.",
+  "requires": [
+    "GET /cel/contracts/{contract_id}/proof-bundle?format=json",
+    "go run ./conformance/runner/helpers/proofbundle/main.go compute"
+  ]
+}

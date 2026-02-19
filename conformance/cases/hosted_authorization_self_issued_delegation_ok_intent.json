@@ -1,0 +1,7 @@
+{
+  "name": "hosted_authorization_self_issued_delegation_ok_intent",
+  "description": "Authorization-required hosted intent path accepts valid self-issued delegation.",
+  "requires": [
+    "POST /commerce/intents"
+  ]
+}

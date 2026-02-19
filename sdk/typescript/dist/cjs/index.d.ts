@@ -92,6 +92,36 @@ export type SignatureEnvelopeV1 = {
     context?: string;
     key_id?: string;
 };
+export type DelegationRevocationV1 = {
+    version: 'delegation-revocation-v1';
+    revocation_id: string;
+    delegation_id: string;
+    issuer_agent: string;
+    nonce: string;
+    issued_at: string;
+    reason?: string;
+};
+export type ProofBundleV1 = {
+    version: 'proof-bundle-v1';
+    protocol: 'contract-lane';
+    protocol_version: '1' | string;
+    bundle: {
+        contract: {
+            contract_id: string;
+            [k: string]: unknown;
+        };
+        evidence: Record<string, unknown>;
+        rules?: unknown;
+        capabilities?: unknown;
+    };
+};
+export type VerifyFailureCode = 'VERIFIED' | 'MALFORMED_INPUT' | 'INVALID_SCHEMA' | 'INVALID_EVIDENCE' | 'INVALID_SIGNATURE' | 'AUTHORIZATION_FAILED' | 'RULES_FAILED' | 'UNKNOWN_ERROR';
+export type VerifyReport = {
+    ok: boolean;
+    code: VerifyFailureCode;
+    proof_id?: string;
+    message?: string;
+};
 export type ApprovalDecideInput = {
     actor_context: Record<string, unknown>;
     decision: string;
@@ -239,6 +269,8 @@ export declare class ContractLaneClient {
 }
 export declare function stableStringify(obj: any): string;
 export declare function canonicalSha256Hex(obj: any): string;
+export declare function canonicalize(obj: any): string;
+export declare function sha256Hex(data: Uint8Array | Buffer | string): string;
 export declare function hexToBytes(hex: string): Uint8Array;
 export declare function bytesToBase64(bytes: Uint8Array): string;
 export declare function agentIdFromPublicKey(pub: Uint8Array): string;
@@ -247,6 +279,23 @@ export declare function parseAgentId(id: string): {
     publicKey: Uint8Array;
 };
 export declare function isValidAgentId(id: string): boolean;
+export declare function parseSigV1(sig: SignatureEnvelopeV1, expectedContext?: string): SignatureEnvelopeV1;
+export declare function normalizeAmountV1(currency: string, minorUnits: number): CommerceAmountV1;
+export declare function parseAmountV1(amount: CommerceAmountV1): bigint;
+export declare function parseDelegationV1(payload: DelegationV1): DelegationV1;
+export declare function parseDelegationRevocationV1(payload: DelegationRevocationV1): DelegationRevocationV1;
+export declare function newCommerceIntentV1(payload: Omit<CommerceIntentV1, 'version' | 'nonce' | 'metadata'> & {
+    metadata?: Record<string, unknown>;
+}): CommerceIntentV1;
+export declare function newCommerceAcceptV1(payload: Omit<CommerceAcceptV1, 'version' | 'nonce' | 'metadata'> & {
+    metadata?: Record<string, unknown>;
+}): CommerceAcceptV1;
+export declare function newDelegationV1(payload: Omit<DelegationV1, 'version' | 'nonce'>): DelegationV1;
+export declare function newDelegationRevocationV1(payload: Omit<DelegationRevocationV1, 'version' | 'nonce'>): DelegationRevocationV1;
+export declare function sigV1Sign(context: string, payloadHash: string, secretKey: Uint8Array, issuedAt: Date, keyId?: string): SignatureEnvelopeV1;
+export declare function parseProofBundleV1(proof: any): ProofBundleV1;
+export declare function computeProofId(proof: ProofBundleV1): string;
+export declare function verifyProofBundleV1(proof: ProofBundleV1): VerifyReport;
 export declare function hashDelegationV1(payload: DelegationV1): string;
 export declare function signDelegationV1(payload: DelegationV1, secretKey: Uint8Array, issuedAt: Date): SignatureEnvelopeV1;
 export declare function verifyDelegationV1(payload: DelegationV1, sig: SignatureEnvelopeV1): void;

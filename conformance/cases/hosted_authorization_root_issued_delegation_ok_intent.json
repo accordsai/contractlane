@@ -1,0 +1,7 @@
+{
+  "name": "hosted_authorization_root_issued_delegation_ok_intent",
+  "description": "Authorization-required hosted intent path accepts root-issued delegation when trust set includes issuer.",
+  "requires": [
+    "POST /commerce/intents"
+  ]
+}

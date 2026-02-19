@@ -1,0 +1,8 @@
+{
+  "name": "proof_export_roundtrip_hash_parity",
+  "description": "Fetch evidence and proof for the same server-created contract and verify proof.evidence hash parity with evidence endpoint.",
+  "requires": [
+    "GET /cel/contracts/{contract_id}/evidence?format=json",
+    "GET /cel/contracts/{contract_id}/proof?format=json"
+  ]
+}

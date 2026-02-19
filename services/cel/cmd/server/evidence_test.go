@@ -3,10 +3,15 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"testing"
+
+	clsdk "contractlane/sdk/go/contractlane"
+	"contractlane/services/cel/internal/store"
 )
 
 func TestParseEvidenceIncludeFlagsDefaultAll(t *testing.T) {
@@ -129,3 +134,83 @@ func TestPerformRFC3161AnchorFailedDeterministicCode(t *testing.T) {
 		t.Fatalf("expected TSA_URL_REQUIRED error_code, got %v", got)
 	}
 }
+
+func TestProofRequirementsForContractMatchesPolicy(t *testing.T) {
+	c := store.Contract{RiskLevel: "HIGH"}
+	req := proofRequirementsForContract(c)
+	if req["authorization_required"] != true {
+		t.Fatalf("expected authorization_required=true for HIGH risk")
+	}
+	scopes, ok := req["required_scopes"].(map[string]any)
+	if !ok {
+		t.Fatalf("required_scopes missing")
+	}
+	if scopes["commerce_intent"] != clsdk.DelegationScopeCommerceIntentSign {
+		t.Fatalf("unexpected commerce_intent scope: %v", scopes["commerce_intent"])
+	}
+	if scopes["commerce_accept"] != clsdk.DelegationScopeCommerceAcceptSign {
+		t.Fatalf("unexpected commerce_accept scope: %v", scopes["commerce_accept"])
+	}
+	if req["settlement_required_status"] != "PAID" {
+		t.Fatalf("unexpected settlement_required_status: %v", req["settlement_required_status"])
+	}
+}
+
+func TestContractSnapshotForProofExcludesTimestamps(t *testing.T) {
+	c := store.Contract{
+		ContractID:      "ctr_1",
+		State:           "EFFECTIVE",
+		TemplateID:      "tpl_1",
+		TemplateVersion: stringPtr("v1"),
+	}
+	snap := contractSnapshotForProof(c)
+	if _, ok := snap["created_at"]; ok {
+		t.Fatalf("contract snapshot must not include created_at")
+	}
+	if _, ok := snap["generated_at"]; ok {
+		t.Fatalf("contract snapshot must not include generated_at")
+	}
+	if snap["contract_id"] != "ctr_1" || snap["state"] != "EFFECTIVE" {
+		t.Fatalf("unexpected snapshot payload: %+v", snap)
+	}
+}
+
+func TestBuildContractProofBundleEmbedsEvidenceUnchanged(t *testing.T) {
+	evidence := map[string]any{
+		"bundle_version": "evidence-v1",
+		"hashes": map[string]any{
+			"manifest_hash": "sha256:abc",
+			"bundle_hash":   "sha256:def",
+		},
+		"artifacts": map[string]any{
+			"anchors":          []any{},
+			"webhook_receipts": []any{},
+		},
+	}
+	proof, err := clsdk.BuildContractProofBundle(
+		map[string]any{"contract_id": "ctr_1", "state": "EFFECTIVE"},
+		evidence,
+		proofRequirementsForContract(store.Contract{RiskLevel: "HIGH"}),
+	)
+	if err != nil {
+		t.Fatalf("BuildContractProofBundle: %v", err)
+	}
+	gotEvidence, ok := proof["evidence"].(map[string]any)
+	if !ok {
+		t.Fatalf("proof missing evidence object")
+	}
+	if !reflect.DeepEqual(gotEvidence, evidence) {
+		gb, _ := json.Marshal(gotEvidence)
+		eb, _ := json.Marshal(evidence)
+		t.Fatalf("embedded evidence changed\n got=%s\nwant=%s", gb, eb)
+	}
+	req, ok := proof["requirements"].(map[string]any)
+	if !ok {
+		t.Fatalf("proof missing requirements object")
+	}
+	if req["evidence_manifest_hash"] != "sha256:abc" || req["evidence_bundle_hash"] != "sha256:def" {
+		t.Fatalf("unexpected evidence hash binding in requirements: %+v", req)
+	}
+}
+
+func stringPtr(s string) *string { return &s }

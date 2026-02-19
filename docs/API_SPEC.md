@@ -36,6 +36,8 @@
 - GET  /cel/contracts/{contract_id}/events
 - GET  /cel/contracts/{contract_id}/evidence-bundle
 - GET  /cel/contracts/{contract_id}/evidence
+- GET  /cel/contracts/{contract_id}/proof
+- GET  /cel/contracts/{contract_id}/proof-bundle
 
 ## Execution
 - POST /exec/contracts/{contract_id}/sendForSignature
@@ -59,6 +61,18 @@ Legacy request shape remains supported.
 - `webhook_receipts` (array)
 - `anchors` (array)
 
+## Proof Export
+
+`GET /cel/contracts/{contract_id}/proof?format=json` returns a deterministic proof object with:
+- `protocol` and `protocol_version`
+- `contract` snapshot (minimal fields for verification)
+- `evidence` bundle (embedded evidence-v1 payload)
+- `requirements` metadata (authorization + settlement requirements and evidence hash bindings)
+
+`GET /cel/contracts/{contract_id}/proof-bundle?format=json` returns:
+- `proof`: `proof-bundle-v1` object
+- `proof_id`: lowercase hex SHA-256 of canonical JSON bytes of `proof`
+
 ## Anchors Endpoints
 
 - `POST /cel/contracts/{contract_id}/anchors`
@@ -76,6 +90,12 @@ Execution ingress endpoint:
 - `POST /webhooks/{provider}/{endpoint_token}`
 
 Routing is configured via `webhook_endpoints` records scoped by `(provider, endpoint_token)`, which map incoming webhook requests to a principal and verification secret.
+
+## Capability Discovery
+
+`GET /cel/.well-known/contractlane` advertises available protocol surfaces, including hosted commerce endpoints (`/commerce/intents`, `/commerce/accepts`) and proof export (`/cel/contracts/{id}/proof`).
+
+Operational toggles and hosted-mode error handling are documented in `docs/hosted_mode.md`.
 
 ## Stripe Webhook Setup (Execution)
 

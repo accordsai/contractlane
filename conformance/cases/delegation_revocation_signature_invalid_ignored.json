@@ -1,0 +1,7 @@
+{
+  "name": "delegation_revocation_signature_invalid_ignored",
+  "description": "Revocation with invalid signature is ignored and does not revoke delegation.",
+  "requires": [
+    "go test ./services/cel/cmd/server -run TestEvaluateHostedCommerceAuthorization_RevocationInvalidSignatureIgnored -count=1"
+  ]
+}

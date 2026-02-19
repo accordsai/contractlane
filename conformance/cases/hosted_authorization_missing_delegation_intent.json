@@ -1,0 +1,7 @@
+{
+  "name": "hosted_authorization_missing_delegation_intent",
+  "description": "Authorization-required hosted intent path yields deterministic FORBIDDEN reason=missing_delegation.",
+  "requires": [
+    "POST /commerce/intents"
+  ]
+}

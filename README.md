@@ -74,6 +74,9 @@ Notes:
 - `sdk-test` runs Go, TypeScript, and Python SDK suites.
 - TypeScript uses `npm ci` + build before tests.
 - Python uses `python3` explicitly.
+- Python-only reproducible setup/run:
+  - `make sdk-python-venv`
+  - `make test-sdk-python`
 - Integration tests target `CL_BASE_URL` (default `http://localhost:8080`).
 
 ## Services

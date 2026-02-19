@@ -1,0 +1,7 @@
+{
+  "name": "delegation_revocation_root_issued_valid",
+  "description": "Trusted root-issued revocation invalidates delegation deterministically.",
+  "requires": [
+    "go test ./services/cel/cmd/server -run TestEvaluateHostedCommerceAuthorization_RevocationRootIssuedWithTrust -count=1"
+  ]
+}

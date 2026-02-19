@@ -780,6 +780,12 @@ RR2="$(echo "$R2" | jq -er '.hashes.risk_hash')"
 [[ "$RD1" == "$RD2" ]] || { echo "render diff_hash unstable across runs"; exit 1; }
 [[ "$RR1" == "$RR2" ]] || { echo "render risk_hash unstable across runs"; exit 1; }
 
+if [[ "${SMOKE_PROOF_HTTP:-0}" == "1" ]]; then
+  echo "== Proof endpoint HTTP integration =="
+  CL_INTEGRATION=1 CL_BASE_URL="http://localhost:8082" CL_IAL_BASE_URL="http://localhost:8081" \
+    go test ./services/cel/cmd/server -count=1 -run TestProofEndpointHTTPParityLive
+fi
+
 echo "== Slice 11 delegation e2e =="
 CEL_URL="http://localhost:8082" \
 IAL_URL="http://localhost:8081" \

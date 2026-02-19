@@ -66,6 +66,41 @@ export type SignatureEnvelopeV1 = {
   context?: string;
   key_id?: string;
 };
+export type DelegationRevocationV1 = {
+  version: 'delegation-revocation-v1';
+  revocation_id: string;
+  delegation_id: string;
+  issuer_agent: string;
+  nonce: string;
+  issued_at: string;
+  reason?: string;
+};
+export type ProofBundleV1 = {
+  version: 'proof-bundle-v1';
+  protocol: 'contract-lane';
+  protocol_version: '1' | string;
+  bundle: {
+    contract: { contract_id: string; [k: string]: unknown };
+    evidence: Record<string, unknown>;
+    rules?: unknown;
+    capabilities?: unknown;
+  };
+};
+export type VerifyFailureCode =
+  | 'VERIFIED'
+  | 'MALFORMED_INPUT'
+  | 'INVALID_SCHEMA'
+  | 'INVALID_EVIDENCE'
+  | 'INVALID_SIGNATURE'
+  | 'AUTHORIZATION_FAILED'
+  | 'RULES_FAILED'
+  | 'UNKNOWN_ERROR';
+export type VerifyReport = {
+  ok: boolean;
+  code: VerifyFailureCode;
+  proof_id?: string;
+  message?: string;
+};
 export type ApprovalDecideInput = {
   actor_context: Record<string, unknown>;
   decision: string;
@@ -470,6 +505,17 @@ export function canonicalSha256Hex(obj: any): string {
   return createHash('sha256').update(json, 'utf8').digest('hex');
 }
 
+export function canonicalize(obj: any): string {
+  return stableStringify(obj);
+}
+
+export function sha256Hex(data: Uint8Array | Buffer | string): string {
+  if (typeof data === 'string') {
+    return createHash('sha256').update(data, 'utf8').digest('hex');
+  }
+  return createHash('sha256').update(data).digest('hex');
+}
+
 export function hexToBytes(hex: string): Uint8Array {
   return Uint8Array.from(Buffer.from(hex, 'hex'));
 }
@@ -583,6 +629,7 @@ function normalizeCommerceAcceptV1(acc: CommerceAcceptV1): CommerceAcceptV1 {
 
 const delegationAllowedKeys = new Set(['version', 'delegation_id', 'issuer_agent', 'subject_agent', 'scopes', 'constraints', 'nonce', 'issued_at']);
 const delegationConstraintAllowedKeys = new Set(['contract_id', 'counterparty_agent', 'max_amount', 'valid_from', 'valid_until', 'max_uses', 'purpose']);
+const delegationRevocationAllowedKeys = new Set(['version', 'revocation_id', 'delegation_id', 'issuer_agent', 'nonce', 'issued_at', 'reason']);
 const knownDelegationScopes = new Set(['commerce:intent:sign', 'commerce:accept:sign', 'cel:action:execute', 'cel:approval:sign', 'settlement:attest']);
 const amountExponents: Record<string, number> = { USD: 2, EUR: 2, GBP: 2, JPY: 0, KRW: 0, INR: 2, CHF: 2, CAD: 2, AUD: 2 };
 
@@ -644,6 +691,163 @@ function normalizeDelegationV1(payload: DelegationV1): DelegationV1 {
       ...(c.purpose !== undefined ? { purpose: String(c.purpose) } : {}),
     },
   };
+}
+
+export function parseSigV1(sig: SignatureEnvelopeV1, expectedContext?: string): SignatureEnvelopeV1 {
+  const allowed = new Set(['version', 'algorithm', 'public_key', 'signature', 'payload_hash', 'issued_at', 'context', 'key_id']);
+  for (const k of Object.keys(sig as Record<string, unknown>)) if (!allowed.has(k)) throw new Error(`unknown signature key: ${k}`);
+  if (sig.version !== 'sig-v1') throw new Error('signature_envelope version must be sig-v1');
+  if (sig.algorithm !== 'ed25519') throw new Error('signature_envelope algorithm must be ed25519');
+  if (!/^[0-9a-f]{64}$/.test(sig.payload_hash)) throw new Error('payload_hash must be lowercase hex sha256');
+  parseRFC3339UTC(sig.issued_at, 'issued_at');
+  if (expectedContext && sig.context && sig.context !== expectedContext) throw new Error('signature context mismatch');
+  const pub = Buffer.from(sig.public_key, 'base64');
+  const signature = Buffer.from(sig.signature, 'base64');
+  if (pub.length !== 32 || signature.length !== 64) throw new Error('invalid signature encoding');
+  return sig;
+}
+
+export function normalizeAmountV1(currency: string, minorUnits: number): CommerceAmountV1 {
+  if (!Number.isInteger(minorUnits) || minorUnits < 0) throw new Error('minor units must be non-negative integer');
+  const ccy = String(currency ?? '').trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(ccy)) throw new Error('currency must be ISO4217 uppercase 3 letters');
+  const exp = amountExponents[ccy];
+  if (exp === undefined) throw new Error('unknown currency');
+  if (exp === 0) return { currency: ccy, amount: String(minorUnits) };
+  const base = 10 ** exp;
+  const integer = Math.floor(minorUnits / base);
+  const fraction = minorUnits % base;
+  let amount = `${integer}.${String(fraction).padStart(exp, '0')}`;
+  amount = amount.replace(/0+$/g, '').replace(/\.$/, '');
+  if (!amount) amount = '0';
+  return { currency: ccy, amount };
+}
+
+export function parseAmountV1(amount: CommerceAmountV1): bigint {
+  return parseNormalizedAmountToMinor(amount);
+}
+
+export function parseDelegationV1(payload: DelegationV1): DelegationV1 {
+  return normalizeDelegationV1(payload);
+}
+
+export function parseDelegationRevocationV1(payload: DelegationRevocationV1): DelegationRevocationV1 {
+  const keys = Object.keys(payload as Record<string, unknown>);
+  for (const k of keys) if (!delegationRevocationAllowedKeys.has(k)) throw new Error(`unknown delegation revocation key: ${k}`);
+  if (payload.version !== 'delegation-revocation-v1') throw new Error('version must be delegation-revocation-v1');
+  if (!payload.revocation_id) throw new Error('revocation_id is required');
+  if (!payload.delegation_id) throw new Error('delegation_id is required');
+  if (!isValidAgentId(payload.issuer_agent)) throw new Error('issuer_agent must be valid agent-id-v1');
+  validateBase64URLNoPadding(payload.nonce, 'nonce');
+  parseRFC3339UTC(payload.issued_at, 'issued_at');
+  return payload;
+}
+
+export function newCommerceIntentV1(payload: Omit<CommerceIntentV1, 'version' | 'nonce' | 'metadata'> & { metadata?: Record<string, unknown> }): CommerceIntentV1 {
+  return normalizeCommerceIntentV1({
+    version: 'commerce-intent-v1',
+    nonce: bytesToBase64URLNoPadding(randomBytes(16)),
+    metadata: payload.metadata ?? {},
+    ...payload,
+  });
+}
+
+export function newCommerceAcceptV1(payload: Omit<CommerceAcceptV1, 'version' | 'nonce' | 'metadata'> & { metadata?: Record<string, unknown> }): CommerceAcceptV1 {
+  return normalizeCommerceAcceptV1({
+    version: 'commerce-accept-v1',
+    nonce: bytesToBase64URLNoPadding(randomBytes(16)),
+    metadata: payload.metadata ?? {},
+    ...payload,
+  });
+}
+
+export function newDelegationV1(payload: Omit<DelegationV1, 'version' | 'nonce'>): DelegationV1 {
+  return normalizeDelegationV1({
+    version: 'delegation-v1',
+    nonce: bytesToBase64URLNoPadding(randomBytes(16)),
+    ...payload,
+  });
+}
+
+export function newDelegationRevocationV1(payload: Omit<DelegationRevocationV1, 'version' | 'nonce'>): DelegationRevocationV1 {
+  return parseDelegationRevocationV1({
+    version: 'delegation-revocation-v1',
+    nonce: bytesToBase64URLNoPadding(randomBytes(16)),
+    ...payload,
+  });
+}
+
+export function sigV1Sign(context: string, payloadHash: string, secretKey: Uint8Array, issuedAt: Date, keyId?: string): SignatureEnvelopeV1 {
+  if (!/^[0-9a-f]{64}$/.test(payloadHash)) throw new Error('payload_hash must be lowercase hex sha256');
+  if (!secretKey || secretKey.length !== 64) throw new Error('ed25519 secretKey must be 64 bytes (tweetnacl format)');
+  const signature = nacl.sign.detached(hexToBytes(payloadHash), secretKey);
+  const keyPair = nacl.sign.keyPair.fromSecretKey(secretKey);
+  return {
+    version: 'sig-v1',
+    algorithm: 'ed25519',
+    public_key: bytesToBase64(keyPair.publicKey),
+    signature: bytesToBase64(signature),
+    payload_hash: payloadHash,
+    issued_at: issuedAt.toISOString(),
+    context,
+    ...(keyId ? { key_id: keyId } : {}),
+  };
+}
+
+export function parseProofBundleV1(proof: any): ProofBundleV1 {
+  if (!proof || typeof proof !== 'object') throw new Error('proof bundle must be object');
+  const allowed = new Set(['version', 'protocol', 'protocol_version', 'bundle']);
+  for (const k of Object.keys(proof as Record<string, unknown>)) if (!allowed.has(k)) throw new Error(`unknown proof bundle key: ${k}`);
+  if (proof.version !== 'proof-bundle-v1') throw new Error('version must be proof-bundle-v1');
+  if (proof.protocol !== 'contract-lane') throw new Error('protocol must be contract-lane');
+  if (String(proof.protocol_version ?? '') !== '1') throw new Error('protocol_version must be 1');
+  if (!proof.bundle || typeof proof.bundle !== 'object') throw new Error('bundle is required');
+  if (!proof.bundle.contract || !proof.bundle.contract.contract_id) throw new Error('bundle.contract.contract_id is required');
+  if (!proof.bundle.evidence || typeof proof.bundle.evidence !== 'object') throw new Error('bundle.evidence is required');
+  return proof as ProofBundleV1;
+}
+
+export function computeProofId(proof: ProofBundleV1): string {
+  parseProofBundleV1(proof);
+  return canonicalSha256Hex(proof);
+}
+
+function verifyProofBundleSignatures(proof: ProofBundleV1): void {
+  const artifacts = (((proof.bundle as any).evidence || {}).artifacts || {}) as Record<string, any>;
+  if (!artifacts || typeof artifacts !== 'object') throw new Error('evidence missing artifacts');
+  for (const row of artifacts.commerce_intents ?? []) {
+    if (row?.intent && row?.buyer_signature) verifyCommerceIntentV1(row.intent, row.buyer_signature);
+  }
+  for (const row of artifacts.commerce_accepts ?? []) {
+    if (row?.accept && row?.seller_signature) verifyCommerceAcceptV1(row.accept, row.seller_signature);
+  }
+  for (const row of artifacts.delegations ?? []) {
+    if (row?.delegation && row?.issuer_signature) verifyDelegationV1(row.delegation, row.issuer_signature);
+  }
+}
+
+export function verifyProofBundleV1(proof: ProofBundleV1): VerifyReport {
+  try {
+    const parsed = parseProofBundleV1(proof);
+    const proofId = computeProofId(parsed);
+    const evContractID = String((((parsed.bundle as any).evidence || {}).contract || {}).contract_id ?? '').trim();
+    const contractID = String(((parsed.bundle as any).contract || {}).contract_id ?? '').trim();
+    if (!evContractID || evContractID !== contractID) {
+      return { ok: false, code: 'INVALID_EVIDENCE', message: 'contract/evidence contract_id mismatch' };
+    }
+    verifyProofBundleSignatures(parsed);
+    return { ok: true, code: 'VERIFIED', proof_id: proofId };
+  } catch (err: any) {
+    const msg = String(err?.message ?? err);
+    let code: VerifyFailureCode = 'UNKNOWN_ERROR';
+    if (msg.includes('version must be proof-bundle-v1') || msg.includes('protocol_version must be 1') || msg.includes('bundle.')) code = 'INVALID_SCHEMA';
+    else if (msg.includes('evidence')) code = 'INVALID_EVIDENCE';
+    else if (msg.includes('signature') || msg.includes('payload hash mismatch')) code = 'INVALID_SIGNATURE';
+    else if (msg.includes('delegation_')) code = 'AUTHORIZATION_FAILED';
+    else if (msg.includes('rules_')) code = 'RULES_FAILED';
+    else code = 'MALFORMED_INPUT';
+    return { ok: false, code, message: msg };
+  }
 }
 
 export function hashDelegationV1(payload: DelegationV1): string {

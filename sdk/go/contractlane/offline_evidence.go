@@ -35,6 +35,9 @@ func BuildOfflineEvidenceBundle(artifacts map[string]any) ([]byte, error) {
 	contractID := "ctr_offline_reference"
 
 	artifactTypes := []string{"anchors", "commerce_accepts", "commerce_intents", "delegations", "settlement_attestations", "webhook_receipts"}
+	if _, ok := normalized["delegation_revocations"]; ok {
+		artifactTypes = append(artifactTypes, "delegation_revocations")
+	}
 	artifactList := make([]map[string]any, 0, len(artifactTypes))
 	for _, t := range artifactTypes {
 		payload := normalized[t]
@@ -223,6 +226,52 @@ func normalizeOfflineArtifacts(in map[string]any) (map[string]any, error) {
 	}
 	out["delegations"] = delegationsPayload
 
+	revocations, err := normalizeSignedDelegationRevocations(in["delegation_revocations"])
+	if err != nil {
+		return nil, err
+	}
+	type revRow struct {
+		hash string
+		row  map[string]any
+	}
+	byHash := map[string]revRow{}
+	for _, r := range revocations {
+		n, err := normalizeDelegationRevocationV1(r.Revocation)
+		if err != nil {
+			return nil, err
+		}
+		if err := VerifyDelegationRevocationV1(n, r.IssuerSignature); err != nil {
+			return nil, err
+		}
+		h, err := HashDelegationRevocationV1(n)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := byHash[h]; exists {
+			continue
+		}
+		byHash[h] = revRow{
+			hash: h,
+			row: map[string]any{
+				"revocation_hash":  h,
+				"revocation":       delegationRevocationPayloadMap(n),
+				"issuer_signature": signatureEnvelopePayload(r.IssuerSignature),
+			},
+		}
+	}
+	if len(byHash) > 0 {
+		hashes := make([]string, 0, len(byHash))
+		for h := range byHash {
+			hashes = append(hashes, h)
+		}
+		sort.Strings(hashes)
+		revPayload := make([]any, 0, len(hashes))
+		for _, h := range hashes {
+			revPayload = append(revPayload, byHash[h].row)
+		}
+		out["delegation_revocations"] = revPayload
+	}
+
 	anchors, err := normalizeAnyArray(in["anchors"])
 	if err != nil {
 		return nil, err
@@ -328,6 +377,21 @@ func normalizeSignedDelegations(v any) ([]SignedDelegationV1, error) {
 	return out, nil
 }
 
+func normalizeSignedDelegationRevocations(v any) ([]SignedDelegationRevocationV1, error) {
+	if v == nil {
+		return []SignedDelegationRevocationV1{}, nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var out []SignedDelegationRevocationV1
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, errors.New("delegation_revocations must be an array of {revocation,issuer_signature}")
+	}
+	return out, nil
+}
+
 func normalizeAnyArray(v any) ([]any, error) {
 	if v == nil {
 		return []any{}, nil
@@ -362,6 +426,8 @@ func artifactIDForOfflineType(artifactType string) string {
 		return "delegations.json"
 	case "settlement_attestations":
 		return "settlement_attestations.json"
+	case "delegation_revocations":
+		return "delegation_revocations.json"
 	default:
 		return artifactType + ".json"
 	}

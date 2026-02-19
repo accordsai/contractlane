@@ -1,0 +1,7 @@
+{
+  "name": "rules_v1_require_settlement_paid_fails",
+  "description": "Offline verifier fails with rules_requirement_failed when rules-v1 requires PAID but evidence status is not PAID.",
+  "requires": [
+    "go test ./sdk/go/contractlane -run TestVerifySettlementProofV1_RulesRequireSettlementPaidFails"
+  ]
+}

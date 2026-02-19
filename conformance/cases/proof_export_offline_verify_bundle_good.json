@@ -1,0 +1,8 @@
+{
+  "name": "proof_export_offline_verify_bundle_good",
+  "description": "Verify the evidence bundle embedded in proof export using EVP offline verifier.",
+  "requires": [
+    "GET /cel/contracts/{contract_id}/proof?format=json",
+    "EVP verify of proof.evidence"
+  ]
+}

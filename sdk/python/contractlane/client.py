@@ -815,3 +815,310 @@ def evaluate_delegation_constraints(constraints: Dict[str, Any], eval_ctx: Dict[
 
 def new_idempotency_key() -> str:
     return str(uuid.uuid4())
+
+
+class VerifyFailureCode:
+    VERIFIED = "VERIFIED"
+    MALFORMED_INPUT = "MALFORMED_INPUT"
+    INVALID_SCHEMA = "INVALID_SCHEMA"
+    INVALID_EVIDENCE = "INVALID_EVIDENCE"
+    INVALID_SIGNATURE = "INVALID_SIGNATURE"
+    AUTHORIZATION_FAILED = "AUTHORIZATION_FAILED"
+    RULES_FAILED = "RULES_FAILED"
+    UNKNOWN_ERROR = "UNKNOWN_ERROR"
+
+
+@dataclass
+class VerifyReport:
+    ok: bool
+    code: str
+    proof_id: str = ""
+    message: str = ""
+
+
+def canonicalize(obj: Any) -> bytes:
+    return _canonical_json_bytes(obj)
+
+
+def sha256_hex(data: bytes) -> str:
+    if not isinstance(data, (bytes, bytearray)):
+        raise ValueError("data must be bytes")
+    return hashlib.sha256(bytes(data)).hexdigest()
+
+
+def canonical_sha256_hex(obj: Any) -> str:
+    return _canonical_sha256_hex(obj)
+
+
+def parse_sig_v1(sig: Dict[str, Any], expected_context: Optional[str] = None) -> Dict[str, Any]:
+    if not isinstance(sig, dict):
+        raise ValueError("signature_envelope must be object")
+    allowed = {"version", "algorithm", "public_key", "signature", "payload_hash", "issued_at", "key_id", "context"}
+    unknown = set(sig.keys()) - allowed
+    if unknown:
+        raise ValueError(f"unknown signature keys: {sorted(unknown)}")
+    if sig.get("version") != "sig-v1":
+        raise ValueError("signature_envelope version must be sig-v1")
+    if sig.get("algorithm") != "ed25519":
+        raise ValueError("signature_envelope algorithm must be ed25519")
+    payload_hash = str(sig.get("payload_hash", ""))
+    if re.fullmatch(r"[0-9a-f]{64}", payload_hash) is None:
+        raise ValueError("payload_hash must be lowercase hex sha256")
+    _parse_rfc3339_utc(str(sig.get("issued_at", "")), "issued_at")
+    if expected_context and sig.get("context") not in (None, "", expected_context):
+        raise ValueError("signature context mismatch")
+    try:
+        pub = base64.b64decode(str(sig.get("public_key", "")))
+        signature = base64.b64decode(str(sig.get("signature", "")))
+    except Exception as exc:
+        raise ValueError("invalid signature encoding") from exc
+    if len(pub) != 32 or len(signature) != 64:
+        raise ValueError("invalid signature encoding")
+    return sig
+
+
+def normalize_amount_v1(currency: str, minor_units: int) -> Dict[str, str]:
+    if not isinstance(minor_units, int) or minor_units < 0:
+        raise ValueError("minor units must be non-negative integer")
+    ccy = str(currency).strip().upper()
+    if re.fullmatch(r"[A-Z]{3}", ccy) is None:
+        raise ValueError("currency must be ISO4217 uppercase 3 letters")
+    exp = _AMOUNT_EXPONENTS.get(ccy)
+    if exp is None:
+        raise ValueError("unknown currency")
+    if exp == 0:
+        return {"currency": ccy, "amount": str(minor_units)}
+    base = 10**exp
+    integer = minor_units // base
+    fraction = minor_units % base
+    amount = f"{integer}.{fraction:0{exp}d}".rstrip("0").rstrip(".")
+    if amount == "":
+        amount = "0"
+    return {"currency": ccy, "amount": amount}
+
+
+def parse_amount_v1(amount: Dict[str, Any]) -> int:
+    return _parse_normalized_amount_to_minor(amount)
+
+
+def parse_delegation_v1(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return _validate_delegation_v1(dict(payload))
+
+
+_DELEGATION_REVOCATION_ALLOWED_KEYS = {
+    "version",
+    "revocation_id",
+    "delegation_id",
+    "issuer_agent",
+    "nonce",
+    "issued_at",
+    "reason",
+}
+
+
+def parse_delegation_revocation_v1(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("delegation revocation payload must be object")
+    unknown = set(payload.keys()) - _DELEGATION_REVOCATION_ALLOWED_KEYS
+    if unknown:
+        raise ValueError(f"unknown delegation revocation keys: {sorted(unknown)}")
+    if payload.get("version") != "delegation-revocation-v1":
+        raise ValueError("version must be delegation-revocation-v1")
+    if not isinstance(payload.get("revocation_id"), str) or not payload["revocation_id"].strip():
+        raise ValueError("revocation_id is required")
+    if not isinstance(payload.get("delegation_id"), str) or not payload["delegation_id"].strip():
+        raise ValueError("delegation_id is required")
+    issuer = str(payload.get("issuer_agent", "")).strip()
+    if not is_valid_agent_id(issuer):
+        raise ValueError("issuer_agent must be valid agent-id-v1")
+    _validate_base64url_no_padding(str(payload.get("nonce", "")), "nonce")
+    _parse_rfc3339_utc(str(payload.get("issued_at", "")), "issued_at")
+    out = dict(payload)
+    out["issuer_agent"] = issuer
+    if "reason" in out and out["reason"] is not None:
+        out["reason"] = str(out["reason"]).strip()
+    return out
+
+
+def parse_proof_bundle_v1(proof: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(proof, dict):
+        raise ValueError("proof bundle must be object")
+    unknown = set(proof.keys()) - {"version", "protocol", "protocol_version", "bundle"}
+    if unknown:
+        raise ValueError(f"unknown proof bundle keys: {sorted(unknown)}")
+    if proof.get("version") != "proof-bundle-v1":
+        raise ValueError("version must be proof-bundle-v1")
+    if proof.get("protocol") != "contract-lane":
+        raise ValueError("protocol must be contract-lane")
+    if str(proof.get("protocol_version", "")) != "1":
+        raise ValueError("protocol_version must be 1")
+    bundle = proof.get("bundle")
+    if not isinstance(bundle, dict):
+        raise ValueError("bundle is required")
+    contract = bundle.get("contract")
+    if not isinstance(contract, dict) or not str(contract.get("contract_id", "")).strip():
+        raise ValueError("bundle.contract.contract_id is required")
+    evidence = bundle.get("evidence")
+    if not isinstance(evidence, dict):
+        raise ValueError("bundle.evidence is required")
+    return proof
+
+
+def new_commerce_intent_v1(
+    *,
+    intent_id: str,
+    contract_id: str,
+    buyer_agent: str,
+    seller_agent: str,
+    items: List[Dict[str, Any]],
+    total: Dict[str, Any],
+    expires_at: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload = {
+        "version": "commerce-intent-v1",
+        "intent_id": intent_id,
+        "contract_id": contract_id,
+        "buyer_agent": buyer_agent,
+        "seller_agent": seller_agent,
+        "items": items,
+        "total": total,
+        "expires_at": expires_at,
+        "nonce": base64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii").rstrip("="),
+        "metadata": metadata or {},
+    }
+    return _validate_commerce_intent_v1(payload)
+
+
+def new_commerce_accept_v1(
+    *,
+    contract_id: str,
+    intent_hash: str,
+    accepted_at: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    payload = {
+        "version": "commerce-accept-v1",
+        "contract_id": contract_id,
+        "intent_hash": intent_hash,
+        "accepted_at": accepted_at,
+        "nonce": base64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii").rstrip("="),
+        "metadata": metadata or {},
+    }
+    return _validate_commerce_accept_v1(payload)
+
+
+def new_delegation_v1(
+    *,
+    delegation_id: str,
+    issuer_agent: str,
+    subject_agent: str,
+    scopes: List[str],
+    constraints: Dict[str, Any],
+    issued_at: str,
+) -> Dict[str, Any]:
+    payload = {
+        "version": "delegation-v1",
+        "delegation_id": delegation_id,
+        "issuer_agent": issuer_agent,
+        "subject_agent": subject_agent,
+        "scopes": scopes,
+        "constraints": constraints,
+        "nonce": base64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii").rstrip("="),
+        "issued_at": issued_at,
+    }
+    return _validate_delegation_v1(payload)
+
+
+def new_delegation_revocation_v1(
+    *,
+    revocation_id: str,
+    delegation_id: str,
+    issuer_agent: str,
+    issued_at: str,
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload = {
+        "version": "delegation-revocation-v1",
+        "revocation_id": revocation_id,
+        "delegation_id": delegation_id,
+        "issuer_agent": issuer_agent,
+        "nonce": base64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii").rstrip("="),
+        "issued_at": issued_at,
+    }
+    if reason is not None:
+        payload["reason"] = reason
+    return parse_delegation_revocation_v1(payload)
+
+
+def sig_v1_sign(context: str, payload_hash: str, signing_key: bytes, issued_at: str, key_id: Optional[str] = None) -> Dict[str, Any]:
+    if not isinstance(signing_key, (bytes, bytearray)) or len(signing_key) != 32:
+        raise ValueError("signing_key must be 32 bytes ed25519 seed")
+    if re.fullmatch(r"[0-9a-f]{64}", str(payload_hash)) is None:
+        raise ValueError("payload_hash must be lowercase hex sha256")
+    issued_dt = _parse_rfc3339_utc(issued_at, "issued_at")
+    sk = SigningKey(bytes(signing_key))
+    vk_raw = bytes(sk.verify_key)
+    sig_raw = sk.sign(bytes.fromhex(payload_hash)).signature
+    env: Dict[str, Any] = {
+        "version": "sig-v1",
+        "algorithm": "ed25519",
+        "public_key": base64.b64encode(vk_raw).decode("ascii"),
+        "signature": base64.b64encode(sig_raw).decode("ascii"),
+        "payload_hash": str(payload_hash),
+        "issued_at": _format_issued_at_utc(issued_dt),
+        "context": context,
+    }
+    if key_id:
+        env["key_id"] = key_id
+    return env
+
+
+def compute_proof_id(proof_bundle_v1: Dict[str, Any]) -> str:
+    parse_proof_bundle_v1(dict(proof_bundle_v1))
+    return _canonical_sha256_hex(proof_bundle_v1)
+
+
+def _verify_proof_bundle_signatures(proof: Dict[str, Any]) -> None:
+    artifacts = (((proof.get("bundle") or {}).get("evidence") or {}).get("artifacts") or {})
+    if not isinstance(artifacts, dict):
+        raise ValueError("evidence missing artifacts")
+    for row in artifacts.get("commerce_intents", []) or []:
+        if isinstance(row, dict) and isinstance(row.get("intent"), dict) and isinstance(row.get("buyer_signature"), dict):
+            verify_commerce_intent_v1(dict(row["intent"]), dict(row["buyer_signature"]))
+    for row in artifacts.get("commerce_accepts", []) or []:
+        if isinstance(row, dict) and isinstance(row.get("accept"), dict) and isinstance(row.get("seller_signature"), dict):
+            verify_commerce_accept_v1(dict(row["accept"]), dict(row["seller_signature"]))
+    for row in artifacts.get("delegations", []) or []:
+        if isinstance(row, dict) and isinstance(row.get("delegation"), dict) and isinstance(row.get("issuer_signature"), dict):
+            verify_delegation_v1(dict(row["delegation"]), dict(row["issuer_signature"]))
+
+
+def verify_proof_bundle_v1(proof_bundle_v1: Dict[str, Any]) -> VerifyReport:
+    try:
+        proof = parse_proof_bundle_v1(dict(proof_bundle_v1))
+        proof_id = compute_proof_id(proof)
+        evidence = (((proof.get("bundle") or {}).get("evidence")) or {})
+        contract = evidence.get("contract") if isinstance(evidence, dict) else None
+        if not isinstance(contract, dict):
+            return VerifyReport(ok=False, code=VerifyFailureCode.INVALID_EVIDENCE, message="evidence.contract missing")
+        if str(contract.get("contract_id", "")).strip() != str(((proof.get("bundle") or {}).get("contract") or {}).get("contract_id", "")).strip():
+            return VerifyReport(ok=False, code=VerifyFailureCode.INVALID_EVIDENCE, message="contract/evidence contract_id mismatch")
+        _verify_proof_bundle_signatures(proof)
+        return VerifyReport(ok=True, code=VerifyFailureCode.VERIFIED, proof_id=proof_id)
+    except Exception as exc:
+        msg = str(exc)
+        code = VerifyFailureCode.UNKNOWN_ERROR
+        if "version must be proof-bundle-v1" in msg or "protocol_version must be 1" in msg or "bundle." in msg:
+            code = VerifyFailureCode.INVALID_SCHEMA
+        elif "evidence" in msg:
+            code = VerifyFailureCode.INVALID_EVIDENCE
+        elif "signature" in msg or "payload hash mismatch" in msg:
+            code = VerifyFailureCode.INVALID_SIGNATURE
+        elif "delegation_" in msg:
+            code = VerifyFailureCode.AUTHORIZATION_FAILED
+        elif "rules_" in msg:
+            code = VerifyFailureCode.RULES_FAILED
+        else:
+            code = VerifyFailureCode.MALFORMED_INPUT
+        return VerifyReport(ok=False, code=code, message=msg)

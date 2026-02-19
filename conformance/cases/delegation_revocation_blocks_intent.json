@@ -1,0 +1,7 @@
+{
+  "name": "delegation_revocation_blocks_intent",
+  "description": "A valid delegation revocation causes deterministic delegation_revoked authorization failure.",
+  "requires": [
+    "go test ./services/cel/cmd/server -run TestEvaluateHostedCommerceAuthorization_DelegationRevoked -count=1"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "rules_v1_require_settlement_paid_passes",
+  "description": "Offline verifier passes when rules-v1 requires settlement_status_is PAID and evidence contains PAID attestation.",
+  "requires": [
+    "go test ./sdk/go/contractlane -run TestVerifySettlementProofV1_RulesRequireSettlementPaidPasses"
+  ]
+}

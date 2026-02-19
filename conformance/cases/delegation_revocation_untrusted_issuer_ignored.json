@@ -1,0 +1,7 @@
+{
+  "name": "delegation_revocation_untrusted_issuer_ignored",
+  "description": "Revocation by an untrusted/non-issuer agent is ignored and delegation remains valid.",
+  "requires": [
+    "go test ./services/cel/cmd/server -run TestEvaluateHostedCommerceAuthorization_RevocationUntrustedIssuerIgnored -count=1"
+  ]
+}

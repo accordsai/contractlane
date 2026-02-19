@@ -11,8 +11,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: sigv1_go_helper '<payload-json>'")
+	if len(os.Args) < 2 || len(os.Args) > 3 {
+		fmt.Fprintln(os.Stderr, "usage: sigv1_go_helper '<payload-json>' [context]")
 		os.Exit(2)
 	}
 
@@ -34,6 +34,13 @@ func main() {
 	pub := priv.Public().(ed25519.PublicKey)
 	sig := ed25519.Sign(priv, h[:])
 
+	ctx := "contract-action"
+	if len(os.Args) == 3 {
+		if os.Args[2] != "" {
+			ctx = os.Args[2]
+		}
+	}
+
 	envelope := map[string]any{
 		"version":      "sig-v1",
 		"algorithm":    "ed25519",
@@ -41,7 +48,7 @@ func main() {
 		"signature":    base64.StdEncoding.EncodeToString(sig),
 		"payload_hash": hex.EncodeToString(h[:]),
 		"issued_at":    "2026-01-01T00:00:00Z",
-		"context":      "contract-action",
+		"context":      ctx,
 	}
 
 	out, err := json.Marshal(envelope)

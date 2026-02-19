@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"contractlane/pkg/evidencehash"
-	signaturev1 "contractlane/pkg/signature"
 )
 
 var base64URLNoPaddingPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -68,30 +67,7 @@ func SignCommerceIntentV1(intent CommerceIntentV1, priv ed25519.PrivateKey, issu
 }
 
 func VerifyCommerceIntentV1(intent CommerceIntentV1, sig SigV1Envelope) error {
-	n, err := normalizeCommerceIntent(intent)
-	if err != nil {
-		return err
-	}
-	hash, err := HashCommerceIntentV1(n)
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(sig.Context) != "" && sig.Context != "commerce-intent" {
-		return errors.New("signature context mismatch")
-	}
-	if sig.PayloadHash != hash {
-		return errors.New("payload hash mismatch")
-	}
-	_, err = signaturev1.VerifyEnvelopeV1(commerceIntentPayload(n), signaturev1.EnvelopeV1{
-		Version:     sig.Version,
-		Algorithm:   sig.Algorithm,
-		PublicKey:   sig.PublicKey,
-		Signature:   sig.Signature,
-		PayloadHash: sig.PayloadHash,
-		IssuedAt:    sig.IssuedAt,
-		KeyID:       sig.KeyID,
-		Context:     sig.Context,
-	})
+	_, err := validateCommerceIntentSubmission(intent, sig)
 	return err
 }
 
@@ -113,30 +89,7 @@ func SignCommerceAcceptV1(acc CommerceAcceptV1, priv ed25519.PrivateKey, issuedA
 }
 
 func VerifyCommerceAcceptV1(acc CommerceAcceptV1, sig SigV1Envelope) error {
-	n, err := normalizeCommerceAccept(acc)
-	if err != nil {
-		return err
-	}
-	hash, err := HashCommerceAcceptV1(n)
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(sig.Context) != "" && sig.Context != "commerce-accept" {
-		return errors.New("signature context mismatch")
-	}
-	if sig.PayloadHash != hash {
-		return errors.New("payload hash mismatch")
-	}
-	_, err = signaturev1.VerifyEnvelopeV1(commerceAcceptPayload(n), signaturev1.EnvelopeV1{
-		Version:     sig.Version,
-		Algorithm:   sig.Algorithm,
-		PublicKey:   sig.PublicKey,
-		Signature:   sig.Signature,
-		PayloadHash: sig.PayloadHash,
-		IssuedAt:    sig.IssuedAt,
-		KeyID:       sig.KeyID,
-		Context:     sig.Context,
-	})
+	_, err := validateCommerceAcceptSubmission(acc, sig)
 	return err
 }
 

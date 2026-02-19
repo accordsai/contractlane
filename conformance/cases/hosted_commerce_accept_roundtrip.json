@@ -1,0 +1,9 @@
+{
+  "name": "hosted_commerce_accept_roundtrip",
+  "description": "POST /commerce/accepts succeeds after intent submission and evidence includes both commerce_intents and commerce_accepts artifacts.",
+  "requires": [
+    "POST /commerce/intents",
+    "POST /commerce/accepts",
+    "GET /cel/contracts/{id}/evidence?format=json"
+  ]
+}

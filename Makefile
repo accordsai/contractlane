@@ -3,7 +3,7 @@ SHELL := /bin/bash
 PY_SDK_VENV := sdk/python/.venv
 PY_SDK_PYTHON := $(PY_SDK_VENV)/bin/python
 
-.PHONY: up up-dev down migrate test smoke logs fmt sdk-test sdk-conformance wait-ready sdk-python-venv sdk-sanity
+.PHONY: up up-dev down migrate test smoke logs fmt sdk-test sdk-conformance wait-ready sdk-python-venv test-sdk-python sdk-sanity
 
 up:
 	docker compose -f docker-compose.dev.yml up --build -d
@@ -42,6 +42,9 @@ sdk-python-venv:
 	test -x $(PY_SDK_PYTHON) || python3 -m venv $(PY_SDK_VENV)
 	PYTHONNOUSERSITE=1 $(PY_SDK_PYTHON) -m pip install -U pip setuptools wheel >/dev/null
 	PYTHONNOUSERSITE=1 $(PY_SDK_PYTHON) -m pip install -e "sdk/python[dev]" >/dev/null
+
+test-sdk-python: sdk-python-venv
+	PYTHONNOUSERSITE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(PY_SDK_PYTHON) -m pytest sdk/python/tests -q
 
 sdk-test: wait-ready
 	go test ./sdk/go/contractlane -count=1

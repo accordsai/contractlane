@@ -27,6 +27,7 @@ type SettlementProofV1 struct {
 	ReceiptRefs           []string                      `json:"receipt_refs"`
 	Payment               *SettlementProofPayment       `json:"payment,omitempty"`
 	Authorization         *SettlementProofAuthorization `json:"authorization,omitempty"`
+	Requirements          *SettlementProofRequirements  `json:"requirements,omitempty"`
 	IssuedAtUTC           string                        `json:"issued_at_utc"`
 }
 
@@ -38,6 +39,10 @@ type SettlementProofPayment struct {
 type SettlementProofAuthorization struct {
 	Required bool   `json:"required"`
 	Scope    string `json:"scope"`
+}
+
+type SettlementProofRequirements struct {
+	Rules *RulesV1 `json:"rules,omitempty"`
 }
 
 type SettlementProofVerifyOptions struct {
@@ -236,6 +241,11 @@ func VerifySettlementProofV1WithOptions(evidenceBytes []byte, proofBytes []byte,
 	}
 	if proof.Authorization != nil && proof.Authorization.Required {
 		if err := verifyDelegationAuthorization(artifacts, proof, intent, opts); err != nil {
+			return err
+		}
+	}
+	if proof.Requirements != nil && proof.Requirements.Rules != nil {
+		if err := verifyRulesRequirements(evidence, artifacts, proof, intent, opts); err != nil {
 			return err
 		}
 	}
@@ -509,98 +519,79 @@ func verifyDelegationAuthorization(artifacts map[string]any, proof SettlementPro
 	if !ok || len(delegationsAny) == 0 {
 		return errors.New(DelegationFailureMissing)
 	}
-	trustSet := map[string]struct{}{}
-	for _, a := range opts.TrustAgents {
-		v := strings.TrimSpace(a)
-		if v != "" {
-			trustSet[v] = struct{}{}
-		}
+	revocationsAny, _ := artifacts["delegation_revocations"].([]any)
+	var pay *CommerceAmountV1
+	if proof.Payment != nil {
+		p := normalizeProofAmount(proof.Payment.Amount)
+		pay = &p
 	}
-
-	var sawSubject, sawScope, sawSigInvalid, sawUntrusted bool
-	constraintFailure := ""
-	for _, row := range delegationsAny {
-		rm, ok := row.(map[string]any)
-		if !ok {
-			continue
-		}
-		delAny, ok := rm["delegation"]
-		if !ok {
-			continue
-		}
-		del, err := parseDelegationStrict(delAny)
-		if err != nil {
-			continue
-		}
-		if del.SubjectAgent != signingAgent {
-			continue
-		}
-		sawSubject = true
-
-		if !containsString(del.Scopes, scope) {
-			continue
-		}
-		sawScope = true
-
-		sigMap, _ := rm["issuer_signature"].(map[string]any)
-		if sigMap == nil {
-			sawSigInvalid = true
-			continue
-		}
-		sb, _ := json.Marshal(sigMap)
-		var sig SigV1Envelope
-		if err := json.Unmarshal(sb, &sig); err != nil {
-			sawSigInvalid = true
-			continue
-		}
-		if err := VerifyDelegationV1(del, sig); err != nil {
-			sawSigInvalid = true
-			continue
-		}
-
-		if del.IssuerAgent != del.SubjectAgent {
-			if _, ok := trustSet[del.IssuerAgent]; !ok {
-				sawUntrusted = true
-				continue
-			}
-		}
-
-		var pay *CommerceAmountV1
-		if proof.Payment != nil {
-			p := normalizeProofAmount(proof.Payment.Amount)
-			pay = &p
-		}
-		err = EvaluateDelegationConstraints(del.Constraints, DelegationEvalContext{
-			ContractID:        proof.ContractID,
-			CounterpartyAgent: counterparty,
-			IssuedAtUTC:       proof.IssuedAtUTC,
-			PaymentAmount:     pay,
-		})
-		if err != nil {
-			if dErr, ok := err.(*DelegationConstraintError); ok {
-				constraintFailure = dErr.Reason
-			} else {
-				constraintFailure = DelegationFailureConstraintsFailed
-			}
-			continue
-		}
+	decision := evaluateDelegationDecision(delegationDecisionInput{
+		RequiredScope:     scope,
+		SigningAgent:      signingAgent,
+		CounterpartyAgent: counterparty,
+		ContractID:        proof.ContractID,
+		IssuedAtUTC:       proof.IssuedAtUTC,
+		PaymentAmount:     pay,
+		Delegations:       delegationsAny,
+		Revocations:       revocationsAny,
+		TrustAgents:       opts.TrustAgents,
+	})
+	if decision.OK {
 		return nil
 	}
-
-	if !sawSubject {
+	if decision.FailureReason == "" {
 		return errors.New(DelegationFailureMissing)
 	}
-	if !sawScope {
-		return errors.New(DelegationFailureScopeMissing)
+	return errors.New(decision.FailureReason)
+}
+
+func verifyRulesRequirements(evidence map[string]any, artifacts map[string]any, proof SettlementProofV1, intent CommerceIntentV1, opts SettlementProofVerifyOptions) error {
+	if proof.Requirements == nil || proof.Requirements.Rules == nil {
+		return nil
 	}
-	if sawSigInvalid {
-		return errors.New(DelegationFailureSignatureInvalid)
+	eContract, _ := evidence["contract"].(map[string]any)
+	contractState := strings.TrimSpace(fmt.Sprint(eContract["state"]))
+
+	signingAgent := ""
+	counterparty := ""
+	if proof.Authorization != nil {
+		switch strings.TrimSpace(proof.Authorization.Scope) {
+		case DelegationScopeCommerceIntentSign:
+			signingAgent = intent.BuyerAgent
+			counterparty = intent.SellerAgent
+		case DelegationScopeCommerceAcceptSign:
+			signingAgent = intent.SellerAgent
+			counterparty = intent.BuyerAgent
+		}
 	}
-	if sawUntrusted {
-		return errors.New(DelegationFailureUntrustedIssuer)
+	var pay *CommerceAmountV1
+	if proof.Payment != nil {
+		p := normalizeProofAmount(proof.Payment.Amount)
+		pay = &p
 	}
-	if constraintFailure != "" {
-		return errors.New(constraintFailure)
+	res, err := EvaluateRulesV1(*proof.Requirements.Rules, RulesEvaluationInput{
+		ContractID:        proof.ContractID,
+		ContractState:     contractState,
+		Artifacts:         artifacts,
+		TrustAgents:       opts.TrustAgents,
+		SigningAgent:      signingAgent,
+		CounterpartyAgent: counterparty,
+		IssuedAtUTC:       proof.IssuedAtUTC,
+		PaymentAmount:     pay,
+	})
+	if err != nil {
+		return err
 	}
-	return errors.New(DelegationFailureMissing)
+	for _, rr := range res.RuleResults {
+		for _, eff := range rr.Effects {
+			if eff.Type != "require" {
+				continue
+			}
+			if eff.Satisfied != nil && !*eff.Satisfied {
+				return fmt.Errorf("rules_requirement_failed: rule_id=%s require=%s failure_reason=%s", rr.RuleID, eff.Name, eff.FailureReason)
+			}
+		}
+	}
+	// Transition enforcement is intentionally dormant until transition claims are part of proof verification.
+	return nil
 }

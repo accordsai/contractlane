@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -85,42 +84,7 @@ func NormalizeMinorUnits(currency string, minor int64) (NormalizedAmount, error)
 }
 
 func DeriveSettlementAttestationsFromReceipts(receipts any) ([]SettlementAttestationV1, error) {
-	receiptList, err := normalizeAnyArray(receipts)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]SettlementAttestationV1, 0, len(receiptList))
-	for _, row := range receiptList {
-		rm, ok := row.(map[string]any)
-		if !ok {
-			continue
-		}
-		if valid, present := rm["signature_valid"]; present {
-			if vb, ok := valid.(bool); !ok || !vb {
-				continue
-			}
-		}
-		provider := strings.ToLower(strings.TrimSpace(fmt.Sprint(rm["provider"])))
-		if provider != "stripe" {
-			continue
-		}
-		eventPayload, ok := extractReceiptPayload(rm)
-		if !ok {
-			continue
-		}
-		att, ok := deriveStripeAttestation(rm, eventPayload)
-		if !ok {
-			continue
-		}
-		out = append(out, att)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Provider == out[j].Provider {
-			return out[i].ProviderEventID < out[j].ProviderEventID
-		}
-		return out[i].Provider < out[j].Provider
-	})
-	return out, nil
+	return deriveSettlementAttestations(receipts)
 }
 
 func extractReceiptPayload(receipt map[string]any) (map[string]any, bool) {

@@ -23,19 +23,39 @@ required_cases=(
   agent_id_v1_roundtrip.json
   settlement_proof_offline.json
   settlement_proof_make_offline.json
+  rules_v1_require_settlement_paid_passes.json
+  rules_v1_require_settlement_paid_fails.json
+  rules_v1_require_amount_match_fails.json
   settlement_delegation_self_issued_pass.json
   settlement_delegation_missing_fail.json
   settlement_delegation_expired_fail.json
   settlement_delegation_amount_exceeded_fail.json
   settlement_delegation_root_issued_trust_pass.json
   well_known_protocol_capabilities.json
+  well_known_protocol_capabilities_hosted_commerce_and_proof.json
+  well_known_protocol_capabilities_deterministic.json
   gate_status_done.json
   gate_status_blocked.json
   gate_resolve_requires_idempotency.json
   error_model_401.json
   retry_429_then_success.json
   sig_v1_approval_happy_path.json
+  hosted_commerce_intent_roundtrip.json
+  hosted_commerce_accept_roundtrip.json
+  hosted_authorization_missing_delegation_intent.json
+  hosted_authorization_self_issued_delegation_ok_intent.json
+  hosted_authorization_root_issued_delegation_ok_intent.json
+  delegation_revocation_blocks_intent.json
+  delegation_revocation_untrusted_issuer_ignored.json
+  delegation_revocation_root_issued_valid.json
+  delegation_revocation_signature_invalid_ignored.json
   evidence_contains_anchors_and_receipts.json
+  proof_export_roundtrip_hash_parity.json
+  proof_export_offline_verify_bundle_good.json
+  proof_bundle_v1_export_deterministic.json
+  proof_bundle_v1_id_matches.json
+  proof_bundle_v1_offline_verify_ok.json
+  proof_bundle_v1_tamper_fails.json
   evp_verify_bundle_good.json
 )
 
@@ -47,6 +67,7 @@ CASES_FAILED=0
 EXIT_CODE=0
 CONFORMANCE_CONTRACT_ID="${CONFORMANCE_CONTRACT_ID:-}"
 CONFORMANCE_EVIDENCE_JSON="${CONFORMANCE_EVIDENCE_JSON:-}"
+CONFORMANCE_COMMERCE_INTENT_HASH="${CONFORMANCE_COMMERCE_INTENT_HASH:-}"
 LAST_CASE_OUTPUT=""
 
 log() {
@@ -243,6 +264,29 @@ run_well_known_capabilities_case() {
   echo "$cap" | jq -e '.evidence.always_present_artifacts | index("webhook_receipts") != null' >/dev/null
 }
 
+run_well_known_capabilities_hosted_commerce_and_proof_case() {
+  local cap
+  cap="$(curl_json GET "$BASE_URL/cel/.well-known/contractlane")"
+  echo "$cap" | jq -e '.commerce.intent_v1.hosted == true' >/dev/null
+  echo "$cap" | jq -e '.commerce.intent_v1.endpoint == "/commerce/intents"' >/dev/null
+  echo "$cap" | jq -e '.commerce.accept_v1.hosted == true' >/dev/null
+  echo "$cap" | jq -e '.commerce.accept_v1.endpoint == "/commerce/accepts"' >/dev/null
+  echo "$cap" | jq -e '.proof_export.endpoint == "/cel/contracts/{id}/proof"' >/dev/null
+  echo "$cap" | jq -e '.proof_export.formats | index("json") != null' >/dev/null
+  echo "$cap" | jq -e '.commerce.settlement_attestations.server_derived | type == "boolean"' >/dev/null
+  echo "$cap" | jq -e '.authorization.delegation_v1.server_enforced == true' >/dev/null
+  echo "$cap" | jq -e '.authorization.delegation_v1.trust_agents_configurable == true' >/dev/null
+}
+
+run_well_known_capabilities_deterministic_case() {
+  local cap1 cap2 can1 can2
+  cap1="$(curl_json GET "$BASE_URL/cel/.well-known/contractlane")"
+  cap2="$(curl_json GET "$BASE_URL/cel/.well-known/contractlane")"
+  can1="$(printf '%s' "$cap1" | jq -cS .)"
+  can2="$(printf '%s' "$cap2" | jq -cS .)"
+  [[ "$can1" == "$can2" ]]
+}
+
 run_agent_id_offline_case() {
   local fixture expected got
   fixture="$ROOT/conformance/cases/agent_id_v1_roundtrip.json"
@@ -279,6 +323,18 @@ run_settlement_proof_make_offline_case() {
     --proof "$tmp_proof" >/dev/null
 
   diff -u "$tmp_proof" "$fixture_dir/settlement_proof.json" >/dev/null
+}
+
+run_rules_v1_require_settlement_paid_passes_case() {
+  GOCACHE=/tmp/go-build go test ./sdk/go/contractlane -count=1 -run TestVerifySettlementProofV1_RulesRequireSettlementPaidPasses >/dev/null
+}
+
+run_rules_v1_require_settlement_paid_fails_case() {
+  GOCACHE=/tmp/go-build go test ./sdk/go/contractlane -count=1 -run TestVerifySettlementProofV1_RulesRequireSettlementPaidFails >/dev/null
+}
+
+run_rules_v1_require_amount_match_fails_case() {
+  GOCACHE=/tmp/go-build go test ./sdk/go/contractlane -count=1 -run TestVerifySettlementProofV1_RulesRequireAmountMatchFails >/dev/null
 }
 
 run_settlement_delegation_self_issued_case() {
@@ -403,6 +459,105 @@ run_evidence_artifact_case() {
   export CONFORMANCE_EVIDENCE_JSON
 }
 
+run_hosted_commerce_intent_roundtrip_case() {
+  local agent_auth intent_payload envelope req resp intent_hash evidence_json
+  ensure_conformance_context
+  if [[ -z "${CONFORMANCE_CONTRACT_ID:-}" ]]; then
+    echo "missing conformance contract id" >&2
+    return 1
+  fi
+  agent_auth="Authorization: Bearer $AGENT_TOKEN"
+  intent_payload="$(jq -cn --arg cid "$CONFORMANCE_CONTRACT_ID" '{
+    version:"commerce-intent-v1",
+    intent_id:"ci_hosted_conf_1",
+    contract_id:$cid,
+    buyer_agent:"agent:pk:ed25519:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    seller_agent:"agent:pk:ed25519:URw0oaLLUh3xa7JGuN6OeZfOI1x-drIqPXUDokgZ3Yo",
+    items:[{sku:"sku_conf_1",qty:1,unit_price:{currency:"USD",amount:"26"}}],
+    total:{currency:"USD",amount:"26"},
+    expires_at:"2026-12-31T23:59:59Z",
+    nonce:"Y29uZm9ybWFuY2VfaW50ZW50X25vbmNlX3Yx",
+    metadata:{}
+  }')"
+  envelope="$(go run "$ROOT/conformance/runner/helpers/sigv1/main.go" "$intent_payload" "commerce-intent")"
+  req="$(jq -cn --argjson intent "$intent_payload" --argjson sig "$envelope" '{intent:$intent,signature:$sig}')"
+  resp="$(curl_json POST "$BASE_URL/commerce/intents" "$req" "$agent_auth")"
+  intent_hash="$(echo "$resp" | jq -er '.intent_hash')"
+  [[ "$(echo "$resp" | jq -er '.status')" == "ACCEPTED" ]]
+
+  evidence_json="$(curl_json GET "$BASE_URL/cel/contracts/${CONFORMANCE_CONTRACT_ID}/evidence?format=json" "" "$agent_auth")"
+  echo "$evidence_json" | jq -e '([.manifest.artifacts[] | select(.artifact_type=="commerce_intents")] | length) >= 1' >/dev/null
+  echo "$evidence_json" | jq -e --arg h "$intent_hash" '.artifacts.commerce_intents | any(.intent.intent_id=="ci_hosted_conf_1")' >/dev/null
+
+  CONFORMANCE_COMMERCE_INTENT_HASH="$intent_hash"
+  CONFORMANCE_EVIDENCE_JSON="$evidence_json"
+  export CONFORMANCE_COMMERCE_INTENT_HASH
+  export CONFORMANCE_EVIDENCE_JSON
+}
+
+run_hosted_commerce_accept_roundtrip_case() {
+  local agent_auth accept_payload envelope req resp accept_hash evidence_json
+  ensure_conformance_context
+  if [[ -z "${CONFORMANCE_CONTRACT_ID:-}" ]]; then
+    echo "missing conformance contract id" >&2
+    return 1
+  fi
+  if [[ -z "${CONFORMANCE_COMMERCE_INTENT_HASH:-}" ]]; then
+    echo "missing conformance intent hash" >&2
+    return 1
+  fi
+  agent_auth="Authorization: Bearer $AGENT_TOKEN"
+  accept_payload="$(jq -cn --arg cid "$CONFORMANCE_CONTRACT_ID" --arg ih "$CONFORMANCE_COMMERCE_INTENT_HASH" '{
+    version:"commerce-accept-v1",
+    contract_id:$cid,
+    intent_hash:$ih,
+    accepted_at:"2026-12-31T23:59:59Z",
+    nonce:"Y29uZm9ybWFuY2VfYWNjZXB0X25vbmNlX3Yx",
+    metadata:{}
+  }')"
+  envelope="$(go run "$ROOT/conformance/runner/helpers/sigv1/main.go" "$accept_payload" "commerce-accept")"
+  req="$(jq -cn --argjson accept "$accept_payload" --argjson sig "$envelope" '{accept:$accept,signature:$sig}')"
+  resp="$(curl_json POST "$BASE_URL/commerce/accepts" "$req" "$agent_auth")"
+  accept_hash="$(echo "$resp" | jq -er '.accept_hash')"
+  [[ "$(echo "$resp" | jq -er '.status')" == "ACCEPTED" ]]
+
+  evidence_json="$(curl_json GET "$BASE_URL/cel/contracts/${CONFORMANCE_CONTRACT_ID}/evidence?format=json" "" "$agent_auth")"
+  echo "$evidence_json" | jq -e '([.manifest.artifacts[] | select(.artifact_type=="commerce_intents")] | length) >= 1' >/dev/null
+  echo "$evidence_json" | jq -e '([.manifest.artifacts[] | select(.artifact_type=="commerce_accepts")] | length) >= 1' >/dev/null
+  echo "$evidence_json" | jq -e --arg ih "$CONFORMANCE_COMMERCE_INTENT_HASH" '.artifacts.commerce_accepts | any(.accept.intent_hash==$ih)' >/dev/null
+
+  CONFORMANCE_EVIDENCE_JSON="$evidence_json"
+  export CONFORMANCE_EVIDENCE_JSON
+}
+
+run_hosted_authorization_missing_delegation_intent_case() {
+  GOCACHE=/tmp/go-build go test ./services/cel/cmd/server -count=1 -run TestEvaluateHostedCommerceAuthorization_MissingDelegation >/dev/null
+}
+
+run_hosted_authorization_self_issued_delegation_ok_intent_case() {
+  GOCACHE=/tmp/go-build go test ./services/cel/cmd/server -count=1 -run TestEvaluateHostedCommerceAuthorization_SelfIssuedOK >/dev/null
+}
+
+run_hosted_authorization_root_issued_delegation_ok_intent_case() {
+  GOCACHE=/tmp/go-build go test ./services/cel/cmd/server -count=1 -run TestEvaluateHostedCommerceAuthorization_RootIssuedNeedsTrust >/dev/null
+}
+
+run_delegation_revocation_blocks_intent_case() {
+  GOCACHE=/tmp/go-build go test ./services/cel/cmd/server -count=1 -run TestEvaluateHostedCommerceAuthorization_DelegationRevoked >/dev/null
+}
+
+run_delegation_revocation_untrusted_issuer_ignored_case() {
+  GOCACHE=/tmp/go-build go test ./services/cel/cmd/server -count=1 -run TestEvaluateHostedCommerceAuthorization_RevocationUntrustedIssuerIgnored >/dev/null
+}
+
+run_delegation_revocation_root_issued_valid_case() {
+  GOCACHE=/tmp/go-build go test ./services/cel/cmd/server -count=1 -run TestEvaluateHostedCommerceAuthorization_RevocationRootIssuedWithTrust >/dev/null
+}
+
+run_delegation_revocation_signature_invalid_ignored_case() {
+  GOCACHE=/tmp/go-build go test ./services/cel/cmd/server -count=1 -run TestEvaluateHostedCommerceAuthorization_RevocationInvalidSignatureIgnored >/dev/null
+}
+
 run_evp_case() {
   ensure_conformance_context
   if [[ -z "${CONFORMANCE_CONTRACT_ID:-}" ]]; then
@@ -418,6 +573,110 @@ run_evp_case() {
     return 1
   fi
   printf '%s' "${CONFORMANCE_EVIDENCE_JSON:-}" | go run "$ROOT/conformance/runner/helpers/evpverify/main.go" >/dev/null
+}
+
+run_proof_export_roundtrip_hash_parity_case() {
+  local evidence_json proof_json evidence_manifest proof_manifest evidence_bundle proof_bundle
+  ensure_conformance_context
+  if [[ -z "${CONFORMANCE_CONTRACT_ID:-}" ]]; then
+    echo "missing conformance contract id" >&2
+    return 1
+  fi
+
+  evidence_json="$(curl_json GET "$BASE_URL/cel/contracts/${CONFORMANCE_CONTRACT_ID}/evidence?format=json" "" "Authorization: Bearer $AGENT_TOKEN")"
+  proof_json="$(curl_json GET "$BASE_URL/cel/contracts/${CONFORMANCE_CONTRACT_ID}/proof?format=json" "" "Authorization: Bearer $AGENT_TOKEN")"
+
+  evidence_manifest="$(echo "$evidence_json" | jq -er '.hashes.manifest_hash')"
+  proof_manifest="$(echo "$proof_json" | jq -er '.evidence.hashes.manifest_hash')"
+  [[ "$evidence_manifest" == "$proof_manifest" ]]
+
+  evidence_bundle="$(echo "$evidence_json" | jq -er '.hashes.bundle_hash')"
+  proof_bundle="$(echo "$proof_json" | jq -er '.evidence.hashes.bundle_hash')"
+  [[ "$evidence_bundle" == "$proof_bundle" ]]
+
+  echo "$proof_json" | jq -e '.protocol == "contractlane" and .protocol_version == "v1"' >/dev/null
+  echo "$proof_json" | jq -e '.requirements.authorization_required | type == "boolean"' >/dev/null
+  echo "$proof_json" | jq -e '.requirements.required_scopes.commerce_intent == "commerce:intent:sign"' >/dev/null
+  echo "$proof_json" | jq -e '.requirements.required_scopes.commerce_accept == "commerce:accept:sign"' >/dev/null
+  echo "$proof_json" | jq -e '.requirements.settlement_required_status == "PAID"' >/dev/null
+  echo "$proof_json" | jq -e 'has("generated_at") | not' >/dev/null
+  echo "$proof_json" | jq -e 'has("request_id") | not' >/dev/null
+
+  CONFORMANCE_EVIDENCE_JSON="$(echo "$proof_json" | jq -c '.evidence')"
+  export CONFORMANCE_EVIDENCE_JSON
+}
+
+run_proof_export_offline_verify_bundle_good_case() {
+  local proof_json proof_evidence
+  ensure_conformance_context
+  if [[ -z "${CONFORMANCE_CONTRACT_ID:-}" ]]; then
+    echo "missing conformance contract id" >&2
+    return 1
+  fi
+
+  proof_json="$(curl_json GET "$BASE_URL/cel/contracts/${CONFORMANCE_CONTRACT_ID}/proof?format=json" "" "Authorization: Bearer $AGENT_TOKEN")"
+  proof_evidence="$(echo "$proof_json" | jq -c '.evidence')"
+  if [[ -z "$proof_evidence" || "$proof_evidence" == "null" ]]; then
+    echo "proof missing evidence object" >&2
+    return 1
+  fi
+  printf '%s' "$proof_evidence" | go run "$ROOT/conformance/runner/helpers/evpverify/main.go" >/dev/null
+}
+
+run_proof_bundle_v1_export_deterministic_case() {
+  ensure_conformance_context
+  if [[ -z "${CONFORMANCE_CONTRACT_ID:-}" ]]; then
+    echo "missing conformance contract id" >&2
+    return 1
+  fi
+  local r1 r2
+  r1="$(curl_json GET "$BASE_URL/cel/contracts/${CONFORMANCE_CONTRACT_ID}/proof-bundle?format=json" "" "Authorization: Bearer $AGENT_TOKEN")"
+  r2="$(curl_json GET "$BASE_URL/cel/contracts/${CONFORMANCE_CONTRACT_ID}/proof-bundle?format=json" "" "Authorization: Bearer $AGENT_TOKEN")"
+  [[ "$(echo "$r1" | jq -cS .)" == "$(echo "$r2" | jq -cS .)" ]]
+}
+
+run_proof_bundle_v1_id_matches_case() {
+  ensure_conformance_context
+  if [[ -z "${CONFORMANCE_CONTRACT_ID:-}" ]]; then
+    echo "missing conformance contract id" >&2
+    return 1
+  fi
+  local resp pid computed
+  resp="$(curl_json GET "$BASE_URL/cel/contracts/${CONFORMANCE_CONTRACT_ID}/proof-bundle?format=json" "" "Authorization: Bearer $AGENT_TOKEN")"
+  pid="$(echo "$resp" | jq -er '.proof_id')"
+  computed="$(echo "$resp" | jq -c '.proof' | go run "$ROOT/conformance/runner/helpers/proofbundle/main.go" compute)"
+  if [[ "${CONFORMANCE_DEBUG:-}" == "1" ]]; then
+    echo "proof_bundle_debug server_proof_id=$pid"
+    echo "proof_bundle_debug runner_proof_id=$computed"
+    echo "$resp" | jq -c '.proof' | go run "$ROOT/conformance/runner/helpers/proofbundle/main.go" debug
+  fi
+  [[ "$pid" == "$computed" ]]
+}
+
+run_proof_bundle_v1_offline_verify_ok_case() {
+  ensure_conformance_context
+  if [[ -z "${CONFORMANCE_CONTRACT_ID:-}" ]]; then
+    echo "missing conformance contract id" >&2
+    return 1
+  fi
+  local resp
+  resp="$(curl_json GET "$BASE_URL/cel/contracts/${CONFORMANCE_CONTRACT_ID}/proof-bundle?format=json" "" "Authorization: Bearer $AGENT_TOKEN")"
+  echo "$resp" | jq -c '.proof' | go run "$ROOT/conformance/runner/helpers/proofbundle/main.go" verify >/dev/null
+}
+
+run_proof_bundle_v1_tamper_fails_case() {
+  ensure_conformance_context
+  if [[ -z "${CONFORMANCE_CONTRACT_ID:-}" ]]; then
+    echo "missing conformance contract id" >&2
+    return 1
+  fi
+  local resp tampered
+  resp="$(curl_json GET "$BASE_URL/cel/contracts/${CONFORMANCE_CONTRACT_ID}/proof-bundle?format=json" "" "Authorization: Bearer $AGENT_TOKEN")"
+  tampered="$(echo "$resp" | jq -c '.proof | .bundle.contract.contract_id = "ctr_tampered"')"
+  if echo "$tampered" | go run "$ROOT/conformance/runner/helpers/proofbundle/main.go" verify >/dev/null 2>&1; then
+    echo "expected tampered proof bundle verification to fail" >&2
+    return 1
+  fi
 }
 
 run_sdk_conformance_suite() {
@@ -447,12 +706,17 @@ export CL_IAL_BASE_URL="$IAL_BASE_URL"
 run_case "agent_id_v1_roundtrip.json" run_agent_id_offline_case || true
 run_case "settlement_proof_offline.json" run_settlement_proof_offline_case || true
 run_case "settlement_proof_make_offline.json" run_settlement_proof_make_offline_case || true
+run_case "rules_v1_require_settlement_paid_passes.json" run_rules_v1_require_settlement_paid_passes_case || true
+run_case "rules_v1_require_settlement_paid_fails.json" run_rules_v1_require_settlement_paid_fails_case || true
+run_case "rules_v1_require_amount_match_fails.json" run_rules_v1_require_amount_match_fails_case || true
 run_case "settlement_delegation_self_issued_pass.json" run_settlement_delegation_self_issued_case || true
 run_case "settlement_delegation_missing_fail.json" run_settlement_delegation_missing_case || true
 run_case "settlement_delegation_expired_fail.json" run_settlement_delegation_expired_case || true
 run_case "settlement_delegation_amount_exceeded_fail.json" run_settlement_delegation_amount_exceeded_case || true
 run_case "settlement_delegation_root_issued_trust_pass.json" run_settlement_delegation_root_trust_case || true
 run_case "well_known_protocol_capabilities.json" run_well_known_capabilities_case || true
+run_case "well_known_protocol_capabilities_hosted_commerce_and_proof.json" run_well_known_capabilities_hosted_commerce_and_proof_case || true
+run_case "well_known_protocol_capabilities_deterministic.json" run_well_known_capabilities_deterministic_case || true
 
 if [[ "$RUN_STATUS" == "PASS" ]]; then
   if ! resolve_dev_identity; then
@@ -495,7 +759,22 @@ if [[ "$RUN_STATUS" == "PASS" ]]; then
     fi
   fi
 fi
+run_case "hosted_commerce_intent_roundtrip.json" run_hosted_commerce_intent_roundtrip_case || true
+run_case "hosted_commerce_accept_roundtrip.json" run_hosted_commerce_accept_roundtrip_case || true
+run_case "hosted_authorization_missing_delegation_intent.json" run_hosted_authorization_missing_delegation_intent_case || true
+run_case "hosted_authorization_self_issued_delegation_ok_intent.json" run_hosted_authorization_self_issued_delegation_ok_intent_case || true
+run_case "hosted_authorization_root_issued_delegation_ok_intent.json" run_hosted_authorization_root_issued_delegation_ok_intent_case || true
+run_case "delegation_revocation_blocks_intent.json" run_delegation_revocation_blocks_intent_case || true
+run_case "delegation_revocation_untrusted_issuer_ignored.json" run_delegation_revocation_untrusted_issuer_ignored_case || true
+run_case "delegation_revocation_root_issued_valid.json" run_delegation_revocation_root_issued_valid_case || true
+run_case "delegation_revocation_signature_invalid_ignored.json" run_delegation_revocation_signature_invalid_ignored_case || true
 run_case "evidence_contains_anchors_and_receipts.json" run_evidence_artifact_case || true
+run_case "proof_export_roundtrip_hash_parity.json" run_proof_export_roundtrip_hash_parity_case || true
+run_case "proof_export_offline_verify_bundle_good.json" run_proof_export_offline_verify_bundle_good_case || true
+run_case "proof_bundle_v1_export_deterministic.json" run_proof_bundle_v1_export_deterministic_case || true
+run_case "proof_bundle_v1_id_matches.json" run_proof_bundle_v1_id_matches_case || true
+run_case "proof_bundle_v1_offline_verify_ok.json" run_proof_bundle_v1_offline_verify_ok_case || true
+run_case "proof_bundle_v1_tamper_fails.json" run_proof_bundle_v1_tamper_fails_case || true
 run_case "evp_verify_bundle_good.json" run_evp_case || true
 
 # Remaining five shared conformance cases are validated by SDK conformance suites.

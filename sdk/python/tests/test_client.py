@@ -26,6 +26,15 @@ from contractlane.client import (
     evaluate_delegation_constraints,
     _canonical_sha256_hex,
     build_signature_envelope_v1,
+    canonicalize,
+    sha256_hex,
+    canonical_sha256_hex,
+    parse_sig_v1,
+    parse_delegation_revocation_v1,
+    parse_proof_bundle_v1,
+    compute_proof_id,
+    verify_proof_bundle_v1,
+    VerifyFailureCode,
 )
 
 
@@ -385,3 +394,53 @@ def test_delegation_constraints_eval_failures():
             c,
             {"contract_id": "ctr_offline_reference", "counterparty_agent": "agent:pk:ed25519:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8", "issued_at_utc": "2026-02-18T00:00:00Z"},
         )
+
+
+def test_public_canonical_hash_utilities():
+    obj = {"b": 2, "a": 1}
+    b = canonicalize(obj)
+    assert b == b'{"a":1,"b":2}'
+    assert sha256_hex(b) == "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+    assert canonical_sha256_hex(obj) == "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+
+
+def test_parse_sig_v1_rejects_non_utc():
+    with pytest.raises(ValueError):
+        parse_sig_v1(
+            {
+                "version": "sig-v1",
+                "algorithm": "ed25519",
+                "public_key": base64.b64encode(bytes(32)).decode("ascii"),
+                "signature": base64.b64encode(bytes(64)).decode("ascii"),
+                "payload_hash": "a" * 64,
+                "issued_at": "2026-01-01T00:00:00+01:00",
+            }
+        )
+
+
+def test_parse_delegation_revocation_v1_rejects_unknown_key():
+    with pytest.raises(ValueError):
+        parse_delegation_revocation_v1(
+            {
+                "version": "delegation-revocation-v1",
+                "revocation_id": "rev_1",
+                "delegation_id": "del_1",
+                "issuer_agent": "agent:pk:ed25519:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+                "nonce": "bm9uY2VfdjE",
+                "issued_at": "2026-01-01T00:00:00Z",
+                "bad": 1,
+            }
+        )
+
+
+def test_proof_bundle_compute_and_verify_fixture():
+    root = Path(__file__).resolve().parents[3]
+    proof_path = root / "conformance" / "fixtures" / "agent-commerce-offline" / "proof_bundle_v1.json"
+    proof = json.loads(proof_path.read_text())
+    parse_proof_bundle_v1(proof)
+    got = compute_proof_id(proof)
+    expected = (root / "conformance" / "fixtures" / "agent-commerce-offline" / "proof_bundle_v1.id").read_text().strip()
+    assert got == expected
+    report = verify_proof_bundle_v1(proof)
+    assert report.ok is True
+    assert report.code == VerifyFailureCode.VERIFIED

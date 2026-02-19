@@ -1,0 +1,7 @@
+{
+  "name": "proof_bundle_v1_export_deterministic",
+  "description": "GET proof-bundle returns deterministic JSON across repeated calls when contract state is unchanged.",
+  "requires": [
+    "GET /cel/contracts/{contract_id}/proof-bundle?format=json"
+  ]
+}

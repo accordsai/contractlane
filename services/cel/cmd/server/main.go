@@ -7,8 +7,10 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sort"
@@ -24,6 +26,7 @@ import (
 	"contractlane/pkg/evidencehash"
 	"contractlane/pkg/httpx"
 	signaturev1 "contractlane/pkg/signature"
+	clsdk "contractlane/sdk/go/contractlane"
 	"contractlane/services/cel/internal/execclient"
 	"contractlane/services/cel/internal/ialclient"
 	"contractlane/services/cel/internal/idempotency"
@@ -65,55 +68,203 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	cfg := loadHostedModeConfig()
+	commerceLimiter := newFixedWindowLimiter(cfg.HostedRateLimitPerMinute, time.Minute)
+	proofLimiter := newFixedWindowLimiter(cfg.ProofRateLimitPerMinute, time.Minute)
+
+	r.Route("/commerce", func(api chi.Router) {
+		api.Post("/intents", func(w http.ResponseWriter, r *http.Request) {
+			if !precheckHostedCommerceRequest(w, r, cfg, commerceLimiter) {
+				return
+			}
+			const endpoint = "POST /commerce/intents"
+			agent, ok := requireBearerAgentScope(r, w, pool, endpoint, "cel.contracts:write")
+			if !ok {
+				return
+			}
+
+			var req struct {
+				Intent    clsdk.CommerceIntentV1 `json:"intent"`
+				Signature clsdk.SigV1Envelope    `json:"signature"`
+			}
+			if ok := readJSONWithLimit(w, r, cfg.HostedMaxBodyBytes, &req); !ok {
+				return
+			}
+			validated, err := clsdk.ValidateCommerceIntentSubmission(req.Intent, req.Signature)
+			if err != nil {
+				writeStandardError(w, 400, "BAD_REQUEST", err.Error(), "")
+				return
+			}
+
+			c, err := st.GetContract(r.Context(), validated.Intent.ContractID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					httpx.WriteError(w, 404, "NOT_FOUND", "contract not found", nil)
+					return
+				}
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			if c.PrincipalID != agent.PrincipalID {
+				httpx.WriteError(w, 403, "FORBIDDEN", "contract principal mismatch", nil)
+				return
+			}
+
+			if commerceAuthorizationRequired(c) {
+				delegations, err := st.ListCommerceDelegationsForAuthorization(r.Context(), c.ContractID)
+				if err != nil {
+					httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+					return
+				}
+				revocations, err := st.ListCommerceDelegationRevocationsForAuthorization(r.Context(), c.ContractID)
+				if err != nil {
+					httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+					return
+				}
+				okAuth, reason := evaluateHostedCommerceAuthorization(
+					true,
+					clsdk.DelegationScopeCommerceIntentSign,
+					validated.SigningAgent,
+					validated.Intent.SellerAgent,
+					c.ContractID,
+					req.Signature.IssuedAt,
+					&validated.Intent.Total,
+					delegations,
+					revocations,
+					commerceTrustAgents(),
+				)
+				if !okAuth {
+					log.Printf("commerce_intent_auth_failed contract_id=%s reason=%s", c.ContractID, reason)
+					writeStandardError(w, 403, "FORBIDDEN", "delegation authorization failed", reason)
+					return
+				}
+			}
+
+			intentMap, sigMap, err := commerceIntentSubmissionMaps(validated.Intent, req.Signature)
+			if err != nil {
+				httpx.WriteError(w, 500, "INTERNAL_ERROR", err.Error(), nil)
+				return
+			}
+			if err := st.UpsertCommerceIntentArtifact(r.Context(), c.ContractID, agent.ActorID, validated.IntentHash, map[string]any{
+				"intent_hash":     validated.IntentHash,
+				"signing_agent":   validated.SigningAgent,
+				"intent":          intentMap,
+				"buyer_signature": sigMap,
+			}); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			httpx.WriteJSON(w, 200, map[string]any{
+				"contract_id": c.ContractID,
+				"intent_hash": validated.IntentHash,
+				"status":      "ACCEPTED",
+			})
+			log.Printf("commerce_intent_accepted contract_id=%s intent_hash=%s", c.ContractID, validated.IntentHash)
+		})
+
+		api.Post("/accepts", func(w http.ResponseWriter, r *http.Request) {
+			if !precheckHostedCommerceRequest(w, r, cfg, commerceLimiter) {
+				return
+			}
+			const endpoint = "POST /commerce/accepts"
+			agent, ok := requireBearerAgentScope(r, w, pool, endpoint, "cel.contracts:write")
+			if !ok {
+				return
+			}
+
+			var req struct {
+				Accept    clsdk.CommerceAcceptV1 `json:"accept"`
+				Signature clsdk.SigV1Envelope    `json:"signature"`
+			}
+			if ok := readJSONWithLimit(w, r, cfg.HostedMaxBodyBytes, &req); !ok {
+				return
+			}
+			validated, err := clsdk.ValidateCommerceAcceptSubmission(req.Accept, req.Signature)
+			if err != nil {
+				writeStandardError(w, 400, "BAD_REQUEST", err.Error(), "")
+				return
+			}
+
+			c, err := st.GetContract(r.Context(), validated.Accept.ContractID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					httpx.WriteError(w, 404, "NOT_FOUND", "contract not found", nil)
+					return
+				}
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			if c.PrincipalID != agent.PrincipalID {
+				httpx.WriteError(w, 403, "FORBIDDEN", "contract principal mismatch", nil)
+				return
+			}
+
+			okHash, err := st.CommerceIntentHashExists(r.Context(), c.ContractID, validated.Accept.IntentHash)
+			if err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			if !okHash {
+				httpx.WriteError(w, 400, "BAD_REQUEST", "accept.intent_hash not found", nil)
+				return
+			}
+
+			if commerceAuthorizationRequired(c) {
+				delegations, err := st.ListCommerceDelegationsForAuthorization(r.Context(), c.ContractID)
+				if err != nil {
+					httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+					return
+				}
+				revocations, err := st.ListCommerceDelegationRevocationsForAuthorization(r.Context(), c.ContractID)
+				if err != nil {
+					httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+					return
+				}
+				okAuth, reason := evaluateHostedCommerceAuthorization(
+					true,
+					clsdk.DelegationScopeCommerceAcceptSign,
+					validated.SigningAgent,
+					"",
+					c.ContractID,
+					req.Signature.IssuedAt,
+					nil,
+					delegations,
+					revocations,
+					commerceTrustAgents(),
+				)
+				if !okAuth {
+					log.Printf("commerce_accept_auth_failed contract_id=%s reason=%s", c.ContractID, reason)
+					writeStandardError(w, 403, "FORBIDDEN", "delegation authorization failed", reason)
+					return
+				}
+			}
+
+			acceptMap, sigMap, err := commerceAcceptSubmissionMaps(validated.Accept, req.Signature)
+			if err != nil {
+				httpx.WriteError(w, 500, "INTERNAL_ERROR", err.Error(), nil)
+				return
+			}
+			if err := st.UpsertCommerceAcceptArtifact(r.Context(), c.ContractID, agent.ActorID, validated.AcceptHash, map[string]any{
+				"accept_hash":      validated.AcceptHash,
+				"signing_agent":    validated.SigningAgent,
+				"accept":           acceptMap,
+				"seller_signature": sigMap,
+			}); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			httpx.WriteJSON(w, 200, map[string]any{
+				"contract_id": c.ContractID,
+				"accept_hash": validated.AcceptHash,
+				"status":      "ACCEPTED",
+			})
+			log.Printf("commerce_accept_accepted contract_id=%s accept_hash=%s", c.ContractID, validated.AcceptHash)
+		})
+	})
 
 	r.Route("/cel", func(api chi.Router) {
 		api.Get("/.well-known/contractlane", func(w http.ResponseWriter, r *http.Request) {
-			type protocolInfo struct {
-				Name     string   `json:"name"`
-				Versions []string `json:"versions"`
-			}
-			type evidenceInfo struct {
-				BundleVersions         []string `json:"bundle_versions"`
-				AlwaysPresentArtifacts []string `json:"always_present_artifacts"`
-			}
-			type signaturesInfo struct {
-				Envelopes  []string `json:"envelopes"`
-				Algorithms []string `json:"algorithms"`
-			}
-			type featuresInfo struct {
-				Webhooks       bool `json:"webhooks"`
-				Anchors        bool `json:"anchors"`
-				StripeVerifier bool `json:"stripe_verifier"`
-				RFC3161        bool `json:"rfc3161"`
-				Delegation     bool `json:"delegation"`
-			}
-			type capabilities struct {
-				Protocol   protocolInfo   `json:"protocol"`
-				Evidence   evidenceInfo   `json:"evidence"`
-				Signatures signaturesInfo `json:"signatures"`
-				Features   featuresInfo   `json:"features"`
-			}
-			httpx.WriteJSON(w, 200, capabilities{
-				Protocol: protocolInfo{
-					Name:     "contractlane",
-					Versions: []string{"v1"},
-				},
-				Evidence: evidenceInfo{
-					BundleVersions:         []string{"evidence-v1"},
-					AlwaysPresentArtifacts: []string{"anchors", "webhook_receipts"},
-				},
-				Signatures: signaturesInfo{
-					Envelopes:  []string{"sig-v1"},
-					Algorithms: []string{"ed25519"},
-				},
-				Features: featuresInfo{
-					Webhooks:       true,
-					Anchors:        true,
-					StripeVerifier: true,
-					RFC3161:        true,
-					Delegation:     true,
-				},
-			})
+			httpx.WriteJSON(w, 200, buildCapabilitiesResponse(cfg))
 		})
 
 		// DEV helper to seed a template for smoke tests
@@ -773,6 +924,142 @@ func main() {
 			}
 			evidence["request_id"] = httpx.NewRequestID()
 			httpx.WriteJSON(w, 200, evidence)
+		})
+
+		api.Get("/contracts/{contract_id}/proof", func(w http.ResponseWriter, r *http.Request) {
+			if !precheckProofExportRequest(w, r, cfg, proofLimiter) {
+				return
+			}
+			contractID := chi.URLParam(r, "contract_id")
+			agent, err := authn.AuthenticateAgentBearer(r.Context(), pool, r.Header.Get("Authorization"))
+			if err != nil {
+				writeStandardError(w, 401, "UNAUTHORIZED", "agent authentication required", "")
+				return
+			}
+			c, err := st.GetContract(r.Context(), contractID)
+			if err != nil {
+				writeStandardError(w, 404, "NOT_FOUND", "contract not found", "")
+				return
+			}
+			if c.PrincipalID != agent.PrincipalID {
+				writeStandardError(w, 404, "NOT_FOUND", "contract not found", "")
+				return
+			}
+			format := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("format")))
+			if format == "" {
+				format = "json"
+			}
+			if format != "json" {
+				writeStandardError(w, 400, "BAD_REQUEST", "format must be json", "")
+				return
+			}
+			redact := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("redact")))
+			if redact == "" {
+				redact = "none"
+			}
+			if redact != "none" && redact != "pii" {
+				writeStandardError(w, 422, "BAD_REDACT", "redact must be none or pii", "")
+				return
+			}
+			include, err := parseEvidenceIncludeFlags(r.URL.Query().Get("include"))
+			if err != nil {
+				writeStandardError(w, 422, "BAD_INCLUDE", err.Error(), "")
+				return
+			}
+			evidence, err := buildContractEvidenceBundle(r.Context(), st, ial, c, include, redact)
+			if err != nil {
+				writeStandardError(w, 500, "DB_ERROR", err.Error(), "")
+				return
+			}
+			proof, err := clsdk.BuildContractProofBundle(
+				contractSnapshotForProof(c),
+				evidence,
+				proofRequirementsForContract(c),
+			)
+			if err != nil {
+				writeStandardError(w, 500, "INTERNAL_ERROR", err.Error(), "")
+				return
+			}
+			httpx.WriteJSON(w, 200, proof)
+			log.Printf("proof_exported contract_id=%s", c.ContractID)
+		})
+
+		api.Get("/contracts/{contract_id}/proof-bundle", func(w http.ResponseWriter, r *http.Request) {
+			if !precheckProofBundleExportRequest(w, r, cfg, proofLimiter) {
+				return
+			}
+			contractID := chi.URLParam(r, "contract_id")
+			agent, err := authn.AuthenticateAgentBearer(r.Context(), pool, r.Header.Get("Authorization"))
+			if err != nil {
+				writeStandardError(w, 401, "UNAUTHORIZED", "agent authentication required", "")
+				return
+			}
+			c, err := st.GetContract(r.Context(), contractID)
+			if err != nil {
+				writeStandardError(w, 404, "NOT_FOUND", "contract not found", "")
+				return
+			}
+			if c.PrincipalID != agent.PrincipalID {
+				writeStandardError(w, 404, "NOT_FOUND", "contract not found", "")
+				return
+			}
+			format := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("format")))
+			if format == "" {
+				format = "json"
+			}
+			if format != "json" {
+				writeStandardError(w, 400, "BAD_REQUEST", "format must be json", "")
+				return
+			}
+			redact := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("redact")))
+			if redact == "" {
+				redact = "none"
+			}
+			if redact != "none" && redact != "pii" {
+				writeStandardError(w, 422, "BAD_REDACT", "redact must be none or pii", "")
+				return
+			}
+			include, err := parseEvidenceIncludeFlags(r.URL.Query().Get("include"))
+			if err != nil {
+				writeStandardError(w, 422, "BAD_INCLUDE", err.Error(), "")
+				return
+			}
+			evidence, err := buildContractEvidenceBundle(r.Context(), st, ial, c, include, redact)
+			if err != nil {
+				writeStandardError(w, 500, "DB_ERROR", err.Error(), "")
+				return
+			}
+			proofBundle, err := clsdk.BuildProofBundleV1(
+				contractExportForProofBundle(c),
+				evidence,
+				nil,
+				buildCapabilitiesResponse(cfg),
+			)
+			if err != nil {
+				writeStandardError(w, 500, "INTERNAL_ERROR", err.Error(), "")
+				return
+			}
+			proofID, err := clsdk.ComputeProofID(proofBundle)
+			if err != nil {
+				writeStandardError(w, 500, "INTERNAL_ERROR", err.Error(), "")
+				return
+			}
+			if os.Getenv("CONFORMANCE_DEBUG") == "1" {
+				b, _ := json.Marshal(proofBundle)
+				var generic any
+				_ = json.Unmarshal(b, &generic)
+				debugHash, debugBytes, debugErr := evidencehash.CanonicalSHA256(generic)
+				if debugErr != nil {
+					log.Printf("proof_bundle_debug compute_err=%v", debugErr)
+				} else {
+					log.Printf("proof_bundle_debug proof_id=%s canonical_sha=%s canonical_len=%d", proofID, debugHash, len(debugBytes))
+				}
+			}
+			httpx.WriteJSON(w, 200, map[string]any{
+				"proof":    proofBundle,
+				"proof_id": proofID,
+			})
+			log.Printf("proof_bundle_exported contract_id=%s proof_id=%s", c.ContractID, proofID)
 		})
 
 		api.Post("/contracts/{contract_id}/anchors", func(w http.ResponseWriter, r *http.Request) {
@@ -1807,6 +2094,24 @@ func main() {
 				httpx.WriteError(w, 404, "NOT_FOUND", err.Error(), nil)
 				return
 			}
+			rulesArtifacts, err := buildRulesArtifactsFromContractEvents(r.Context(), st, contractID)
+			if err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			permitted, ruleID, fromState, toState, err := evaluateActionTransitionRulesV1(c, action, rulesArtifacts, commerceTrustAgents())
+			if err != nil {
+				writeStandardError(w, 500, "INTERNAL_ERROR", err.Error(), "")
+				return
+			}
+			if !permitted {
+				msg := "transition not permitted by rules-v1"
+				if ruleID != "" && fromState != "" && toState != "" {
+					msg = fmt.Sprintf("transition not permitted by rules-v1: rule_id=%s from=%s to=%s", ruleID, fromState, toState)
+				}
+				writeStandardError(w, 403, "FORBIDDEN", msg, "rules_transition_not_permitted")
+				return
+			}
 
 			// 1) Variable gates first
 			defs, _ := st.GetTemplateVars(r.Context(), c.TemplateID)
@@ -2429,6 +2734,20 @@ func buildContractEvidenceBundle(
 		}
 		artifacts["contract_events"] = evs
 	}
+	commerceIntents, err := st.ListCommerceIntentsForEvidence(ctx, c.ContractID)
+	if err != nil {
+		return nil, err
+	}
+	if len(commerceIntents) > 0 {
+		artifacts["commerce_intents"] = commerceIntents
+	}
+	commerceAccepts, err := st.ListCommerceAcceptsForEvidence(ctx, c.ContractID)
+	if err != nil {
+		return nil, err
+	}
+	if len(commerceAccepts) > 0 {
+		artifacts["commerce_accepts"] = commerceAccepts
+	}
 	idem, err := st.ListIdempotencyRecordsForContract(ctx, c.PrincipalID, c.ContractID)
 	if err != nil {
 		return nil, err
@@ -2439,6 +2758,11 @@ func buildContractEvidenceBundle(
 		return nil, err
 	}
 	artifacts["delegation_records"] = delegations
+	revocationRows, err := st.ListCommerceDelegationRevocationsForAuthorization(ctx, c.ContractID)
+	if err != nil {
+		return nil, err
+	}
+	artifacts["delegation_revocations"] = normalizeDelegationRevocationsForEvidence(revocationRows)
 	webhookReceipts, err := st.ListVerifiedWebhookReceiptsForContractEvidence(ctx, c.PrincipalID, c.ContractID)
 	if err != nil {
 		return nil, err
@@ -2545,8 +2869,14 @@ func artifactIDForType(artifactType, contractID string) string {
 		return "events:contract"
 	case "idempotency":
 		return "idempotency:records"
+	case "commerce_intents":
+		return "commerce_intents.json"
+	case "commerce_accepts":
+		return "commerce_accepts.json"
 	case "delegation_records":
 		return "delegations:active"
+	case "delegation_revocations":
+		return "delegation_revocations.json"
 	case "webhook_receipts":
 		return "webhook_receipts.json"
 	case "anchors":
@@ -2969,6 +3299,320 @@ func requireAgentScope(r *http.Request, w http.ResponseWriter, pool *pgxpool.Poo
 		authn.LogAuthEvent(r.Context(), pool, "cel", endpoint, actor.PrincipalID, actor.ActorID, "DELEGATION_USED", details)
 	}
 	return true
+}
+
+func requireBearerAgentScope(r *http.Request, w http.ResponseWriter, pool *pgxpool.Pool, endpoint, requiredScope string) (*authn.AgentIdentity, bool) {
+	agent, err := authn.AuthenticateAgentBearer(r.Context(), pool, r.Header.Get("Authorization"))
+	if err != nil {
+		authn.LogAuthFailure(r.Context(), pool, "cel", endpoint, "", "", "UNAUTHORIZED", map[string]any{"required_scope": requiredScope})
+		writeStandardError(w, 401, "UNAUTHORIZED", "agent authentication required", "")
+		return nil, false
+	}
+	allowed, delegated, err := authn.HasScopeOrDelegation(r.Context(), pool, agent, requiredScope, authn.DelegationContext{})
+	if err != nil {
+		writeStandardError(w, 500, "DB_ERROR", err.Error(), "")
+		return nil, false
+	}
+	if !allowed {
+		authn.LogAuthFailure(r.Context(), pool, "cel", endpoint, agent.PrincipalID, agent.ActorID, "INSUFFICIENT_SCOPE", map[string]any{"required_scope": requiredScope})
+		writeStandardError(w, 403, "INSUFFICIENT_SCOPE", "agent lacks required scope", "")
+		return nil, false
+	}
+	if delegated {
+		authn.LogAuthEvent(r.Context(), pool, "cel", endpoint, agent.PrincipalID, agent.ActorID, "DELEGATION_USED", map[string]any{"required_scope": requiredScope})
+	}
+	return agent, true
+}
+
+func commerceAuthorizationRequired(c store.Contract) bool {
+	return strings.EqualFold(strings.TrimSpace(c.RiskLevel), "HIGH")
+}
+
+func contractSnapshotForProof(c store.Contract) map[string]any {
+	return map[string]any{
+		"contract_id":      c.ContractID,
+		"state":            c.State,
+		"template_id":      c.TemplateID,
+		"template_version": c.TemplateVersion,
+	}
+}
+
+func contractExportForProofBundle(c store.Contract) clsdk.ContractExportV1 {
+	out := clsdk.ContractExportV1{
+		ContractID:  c.ContractID,
+		PrincipalID: c.PrincipalID,
+		TemplateID:  c.TemplateID,
+		State:       c.State,
+		RiskLevel:   c.RiskLevel,
+	}
+	if c.TemplateVersion != nil {
+		out.TemplateVersion = *c.TemplateVersion
+	}
+	if c.GateKey != nil {
+		out.GateKey = *c.GateKey
+	}
+	return out
+}
+
+func proofRequirementsForContract(c store.Contract) map[string]any {
+	return map[string]any{
+		"authorization_required": commerceAuthorizationRequired(c),
+		"required_scopes": map[string]any{
+			"commerce_intent": clsdk.DelegationScopeCommerceIntentSign,
+			"commerce_accept": clsdk.DelegationScopeCommerceAcceptSign,
+		},
+		"settlement_required_status": "PAID",
+	}
+}
+
+func commerceTrustAgents() []string {
+	raw := strings.TrimSpace(os.Getenv("COMMERCE_TRUST_AGENTS"))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func evaluateHostedCommerceAuthorization(
+	required bool,
+	scope, signingAgent, counterpartyAgent, contractID, issuedAtUTC string,
+	amount *clsdk.CommerceAmountV1,
+	delegations []map[string]any,
+	revocations []map[string]any,
+	trustAgents []string,
+) (bool, string) {
+	if !required {
+		return true, ""
+	}
+	decision := clsdk.EvaluateDelegationDecision(clsdk.DelegationDecisionInput{
+		RequiredScope:     scope,
+		SigningAgent:      signingAgent,
+		CounterpartyAgent: counterpartyAgent,
+		ContractID:        contractID,
+		IssuedAtUTC:       issuedAtUTC,
+		PaymentAmount:     amount,
+		Delegations:       toAnySliceMaps(delegations),
+		Revocations:       toAnySliceMaps(revocations),
+		TrustAgents:       trustAgents,
+	})
+	if decision.OK {
+		return true, ""
+	}
+	return false, decision.FailureReason
+}
+
+func toAnySliceMaps(xs []map[string]any) []any {
+	out := make([]any, 0, len(xs))
+	for _, x := range xs {
+		out = append(out, x)
+	}
+	return out
+}
+
+func normalizeDelegationRevocationsForEvidence(rows []map[string]any) []map[string]any {
+	if len(rows) == 0 {
+		return []map[string]any{}
+	}
+	type revRow struct {
+		hash string
+		row  map[string]any
+	}
+	byHash := map[string]revRow{}
+	for _, row := range rows {
+		revAny, ok := row["revocation"]
+		if !ok {
+			continue
+		}
+		rev, err := clsdk.ParseDelegationRevocationV1Strict(revAny)
+		if err != nil {
+			continue
+		}
+		h, err := clsdk.HashDelegationRevocationV1(rev)
+		if err != nil {
+			continue
+		}
+		if _, exists := byHash[h]; exists {
+			continue
+		}
+		sigMap, _ := row["issuer_signature"].(map[string]any)
+		out := map[string]any{
+			"revocation_hash": h,
+			"revocation": map[string]any{
+				"version":       rev.Version,
+				"revocation_id": rev.RevocationID,
+				"delegation_id": rev.DelegationID,
+				"issuer_agent":  rev.IssuerAgent,
+				"nonce":         rev.Nonce,
+				"issued_at":     rev.IssuedAt,
+			},
+			"issuer_signature": sigMap,
+		}
+		if strings.TrimSpace(rev.Reason) != "" {
+			out["revocation"].(map[string]any)["reason"] = rev.Reason
+		}
+		byHash[h] = revRow{hash: h, row: out}
+	}
+	if len(byHash) == 0 {
+		return []map[string]any{}
+	}
+	hashes := make([]string, 0, len(byHash))
+	for h := range byHash {
+		hashes = append(hashes, h)
+	}
+	sort.Strings(hashes)
+	out := make([]map[string]any, 0, len(hashes))
+	for _, h := range hashes {
+		out = append(out, byHash[h].row)
+	}
+	return out
+}
+
+func contractRulesV1FromEnv() (*clsdk.RulesV1, error) {
+	raw := strings.TrimSpace(os.Getenv("CEL_RULES_V1_JSON"))
+	if raw == "" {
+		return nil, nil
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil, fmt.Errorf("invalid CEL_RULES_V1_JSON: %w", err)
+	}
+	rules, err := clsdk.ParseRulesV1Strict(payload)
+	if err != nil {
+		return nil, fmt.Errorf("invalid CEL_RULES_V1_JSON: %w", err)
+	}
+	return &rules, nil
+}
+
+func buildRulesArtifactsFromContractEvents(ctx context.Context, st *store.Store, contractID string) (map[string]any, error) {
+	events, err := st.ListEvents(ctx, contractID)
+	if err != nil {
+		return nil, err
+	}
+	settlement := make([]any, 0)
+	for _, ev := range events {
+		if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(ev["type"])), "SETTLEMENT_ATTESTATION") {
+			continue
+		}
+		switch payload := ev["payload"].(type) {
+		case map[string]any:
+			settlement = append(settlement, payload)
+		case []any:
+			for _, item := range payload {
+				if m, ok := item.(map[string]any); ok {
+					settlement = append(settlement, m)
+				}
+			}
+		}
+	}
+	return map[string]any{
+		"settlement_attestations": settlement,
+	}, nil
+}
+
+func evaluateActionTransitionRulesV1(c store.Contract, action string, artifacts map[string]any, trustAgents []string) (permitted bool, ruleID, fromState, toState string, err error) {
+	rules, err := contractRulesV1FromEnv()
+	if err != nil {
+		return false, "", "", "", err
+	}
+	if rules == nil {
+		return true, "", "", "", nil
+	}
+	fromState, toState, ok := inferActionTransition(c.State, action)
+	if !ok {
+		return true, "", "", "", nil
+	}
+	res, err := clsdk.EvaluateRulesV1(*rules, clsdk.RulesEvaluationInput{
+		ContractID:     c.ContractID,
+		ContractState:  c.State,
+		TransitionFrom: fromState,
+		TransitionTo:   toState,
+		Artifacts:      artifacts,
+		TrustAgents:    trustAgents,
+	})
+	if err != nil {
+		return false, "", fromState, toState, err
+	}
+	for _, rr := range res.RuleResults {
+		for _, eff := range rr.Effects {
+			if eff.Type != "permit_transition" {
+				continue
+			}
+			if strings.TrimSpace(eff.From) != fromState || strings.TrimSpace(eff.To) != toState {
+				continue
+			}
+			if eff.Permitted != nil && !*eff.Permitted {
+				return false, rr.RuleID, fromState, toState, nil
+			}
+		}
+	}
+	return true, "", fromState, toState, nil
+}
+
+func inferActionTransition(currentState, action string) (fromState, toState string, ok bool) {
+	fromState = strings.TrimSpace(currentState)
+	act := strings.ToUpper(strings.TrimSpace(action))
+	if fromState == "" || act == "" {
+		return "", "", false
+	}
+	if act == "SEND_FOR_SIGNATURE" {
+		return fromState, "SIGNATURE_SENT", true
+	}
+	switch act {
+	case "DRAFT_CREATED", "POLICY_VALIDATED", "RENDERED", "READY_TO_SIGN", "SIGNATURE_SENT", "SIGNED_BY_US", "SIGNED_BY_THEM", "EFFECTIVE", "ARCHIVED":
+		return fromState, act, true
+	default:
+		return "", "", false
+	}
+}
+
+func commerceIntentSubmissionMaps(intent clsdk.CommerceIntentV1, sig clsdk.SigV1Envelope) (map[string]any, map[string]any, error) {
+	intentB, err := json.Marshal(intent)
+	if err != nil {
+		return nil, nil, err
+	}
+	sigB, err := json.Marshal(sig)
+	if err != nil {
+		return nil, nil, err
+	}
+	var intentMap map[string]any
+	var sigMap map[string]any
+	if err := json.Unmarshal(intentB, &intentMap); err != nil {
+		return nil, nil, err
+	}
+	if err := json.Unmarshal(sigB, &sigMap); err != nil {
+		return nil, nil, err
+	}
+	return intentMap, sigMap, nil
+}
+
+func commerceAcceptSubmissionMaps(acc clsdk.CommerceAcceptV1, sig clsdk.SigV1Envelope) (map[string]any, map[string]any, error) {
+	accB, err := json.Marshal(acc)
+	if err != nil {
+		return nil, nil, err
+	}
+	sigB, err := json.Marshal(sig)
+	if err != nil {
+		return nil, nil, err
+	}
+	var accMap map[string]any
+	var sigMap map[string]any
+	if err := json.Unmarshal(accB, &accMap); err != nil {
+		return nil, nil, err
+	}
+	if err := json.Unmarshal(sigB, &sigMap); err != nil {
+		return nil, nil, err
+	}
+	return accMap, sigMap, nil
 }
 
 func delegationContextForEndpoint(ctx context.Context, pool *pgxpool.Pool, endpoint, principalID string) (authn.DelegationContext, bool, error) {

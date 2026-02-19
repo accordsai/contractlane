@@ -1,0 +1,12 @@
+{
+  "name": "well_known_protocol_capabilities_deterministic",
+  "description": "Fetch well-known capabilities twice and assert deterministic canonical JSON output.",
+  "request": {
+    "method": "GET",
+    "path": "/cel/.well-known/contractlane"
+  },
+  "expect": {
+    "status_code": 200,
+    "deterministic": true
+  }
+}

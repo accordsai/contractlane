@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import nacl from 'tweetnacl';
-import { ContractLaneClient, PrincipalAuth, AgentHmacAuth, IncompatibleNodeError, buildSignatureEnvelopeV1, canonicalSha256Hex, agentIdFromPublicKey, parseAgentId, isValidAgentId, hashCommerceIntentV1, signCommerceIntentV1, verifyCommerceIntentV1, hashCommerceAcceptV1, signCommerceAcceptV1, verifyCommerceAcceptV1, hashDelegationV1, signDelegationV1, verifyDelegationV1, evaluateDelegationConstraints } from '../src/index.ts';
+import { ContractLaneClient, PrincipalAuth, AgentHmacAuth, IncompatibleNodeError, buildSignatureEnvelopeV1, canonicalSha256Hex, canonicalize, sha256Hex, parseSigV1, agentIdFromPublicKey, parseAgentId, isValidAgentId, hashCommerceIntentV1, signCommerceIntentV1, verifyCommerceIntentV1, hashCommerceAcceptV1, signCommerceAcceptV1, verifyCommerceAcceptV1, hashDelegationV1, signDelegationV1, verifyDelegationV1, evaluateDelegationConstraints, parseDelegationRevocationV1, computeProofId, verifyProofBundleV1 } from '../src/index.ts';
 
 test('gateResolve requires idempotency key', async () => {
   const client = new ContractLaneClient({ baseUrl: 'http://example.com', auth: new PrincipalAuth('tok'), fetchFn: async () => new Response('{}', { status: 200 }) as any });
@@ -231,6 +231,51 @@ test('buildSignatureEnvelopeV1 creates sig-v1 envelope', () => {
   assert.ok(env.issued_at.endsWith('Z'));
   assert.equal(Buffer.from(env.public_key, 'base64').length, 32);
   assert.equal(Buffer.from(env.signature, 'base64').length, 64);
+});
+
+test('public canonical utilities', () => {
+  const obj = { b: 2, a: 1 };
+  const c = canonicalize(obj);
+  assert.equal(c, '{"a":1,"b":2}');
+  assert.equal(sha256Hex(c), '43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777');
+  assert.equal(canonicalSha256Hex(obj), '43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777');
+});
+
+test('parseSigV1 rejects non-UTC timestamps', () => {
+  assert.throws(() =>
+    parseSigV1({
+      version: 'sig-v1',
+      algorithm: 'ed25519',
+      public_key: Buffer.alloc(32).toString('base64'),
+      signature: Buffer.alloc(64).toString('base64'),
+      payload_hash: 'a'.repeat(64),
+      issued_at: '2026-01-01T00:00:00+01:00',
+    } as any),
+  );
+});
+
+test('parseDelegationRevocationV1 rejects unknown key', () => {
+  assert.throws(() =>
+    parseDelegationRevocationV1({
+      version: 'delegation-revocation-v1',
+      revocation_id: 'rev_1',
+      delegation_id: 'del_1',
+      issuer_agent: 'agent:pk:ed25519:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8',
+      nonce: 'bm9uY2VfdjE',
+      issued_at: '2026-01-01T00:00:00Z',
+      bad: 1,
+    } as any),
+  );
+});
+
+test('proof bundle compute/verify fixtures', () => {
+  const root = path.resolve(process.cwd(), '..', '..');
+  const proof = JSON.parse(fs.readFileSync(path.join(root, 'conformance', 'fixtures', 'agent-commerce-offline', 'proof_bundle_v1.json'), 'utf8'));
+  const expected = fs.readFileSync(path.join(root, 'conformance', 'fixtures', 'agent-commerce-offline', 'proof_bundle_v1.id'), 'utf8').trim();
+  assert.equal(computeProofId(proof as any), expected);
+  const report = verifyProofBundleV1(proof as any);
+  assert.equal(report.ok, true);
+  assert.equal(report.code, 'VERIFIED');
 });
 
 test('approvalDecide uses signature_envelope when signing key configured', async () => {

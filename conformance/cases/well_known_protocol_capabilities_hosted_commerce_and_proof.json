@@ -1,0 +1,18 @@
+{
+  "name": "well_known_protocol_capabilities_hosted_commerce_and_proof",
+  "request": {
+    "method": "GET",
+    "path": "/cel/.well-known/contractlane"
+  },
+  "expect": {
+    "status_code": 200,
+    "commerce_intent_v1_hosted": true,
+    "commerce_intent_v1_endpoint": "/commerce/intents",
+    "commerce_accept_v1_hosted": true,
+    "commerce_accept_v1_endpoint": "/commerce/accepts",
+    "proof_export_endpoint": "/cel/contracts/{id}/proof",
+    "proof_export_formats_contains": "json",
+    "delegation_v1_server_enforced": true,
+    "delegation_v1_trust_agents_configurable": true
+  }
+}
