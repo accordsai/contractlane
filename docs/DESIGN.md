@@ -13,3 +13,5 @@ V1 is headless to prioritize correctness and agent integrator experience.
 - BLOCKED + next_step (FILL_VARIABLES | REVIEW_VARIABLES | APPROVE_ACTION)
 - or error
 
+## Anchoring
+Anchors are optional post-facto attestations; they never alter bundle determinism or change previously computed evidence hashes.

@@ -1,0 +1,8 @@
+{
+  "name": "evp_verify_bundle_good",
+  "description": "Fetch a good evidence bundle and verify offline via pkg/evp verifier.",
+  "requires": [
+    "GET /cel/contracts/{id}/evidence?format=json",
+    "pkg/evp.VerifyBundleJSON"
+  ]
+}

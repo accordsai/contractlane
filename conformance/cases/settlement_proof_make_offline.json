@@ -1,0 +1,9 @@
+{
+  "name": "settlement_proof_make_offline",
+  "description": "Generate settlement-proof-v1 deterministically from offline evidence fixture and verify byte-for-byte match",
+  "requires": [
+    "cmd/clctl proof make --evidence conformance/fixtures/agent-commerce-offline/evidence.json --out /tmp/settlement_proof.gen.json --intent-id ci_a --contract-id ctr_offline_reference --issued-at-utc 2026-02-18T00:00:00Z",
+    "cmd/clctl proof verify --evidence conformance/fixtures/agent-commerce-offline/evidence.json --proof /tmp/settlement_proof.gen.json",
+    "diff -u /tmp/settlement_proof.gen.json conformance/fixtures/agent-commerce-offline/settlement_proof.json"
+  ]
+}

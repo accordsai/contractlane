@@ -1,0 +1,7 @@
+{
+  "name": "settlement_proof_offline",
+  "description": "Verify settlement-proof-v1 offline against deterministic fixture evidence bundle",
+  "requires": [
+    "cmd/clctl proof verify --evidence conformance/fixtures/agent-commerce-offline/evidence.json --proof conformance/fixtures/agent-commerce-offline/settlement_proof.json"
+  ]
+}

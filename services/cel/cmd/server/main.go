@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -14,12 +16,14 @@ import (
 	"strings"
 	"time"
 
+	anchorrfc3161 "contractlane/pkg/anchor/rfc3161"
 	"contractlane/pkg/authn"
 	"contractlane/pkg/canonhash"
 	"contractlane/pkg/db"
 	"contractlane/pkg/domain"
 	"contractlane/pkg/evidencehash"
 	"contractlane/pkg/httpx"
+	signaturev1 "contractlane/pkg/signature"
 	"contractlane/services/cel/internal/execclient"
 	"contractlane/services/cel/internal/ialclient"
 	"contractlane/services/cel/internal/idempotency"
@@ -63,6 +67,54 @@ func main() {
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 
 	r.Route("/cel", func(api chi.Router) {
+		api.Get("/.well-known/contractlane", func(w http.ResponseWriter, r *http.Request) {
+			type protocolInfo struct {
+				Name     string   `json:"name"`
+				Versions []string `json:"versions"`
+			}
+			type evidenceInfo struct {
+				BundleVersions         []string `json:"bundle_versions"`
+				AlwaysPresentArtifacts []string `json:"always_present_artifacts"`
+			}
+			type signaturesInfo struct {
+				Envelopes  []string `json:"envelopes"`
+				Algorithms []string `json:"algorithms"`
+			}
+			type featuresInfo struct {
+				Webhooks       bool `json:"webhooks"`
+				Anchors        bool `json:"anchors"`
+				StripeVerifier bool `json:"stripe_verifier"`
+				RFC3161        bool `json:"rfc3161"`
+				Delegation     bool `json:"delegation"`
+			}
+			type capabilities struct {
+				Protocol   protocolInfo   `json:"protocol"`
+				Evidence   evidenceInfo   `json:"evidence"`
+				Signatures signaturesInfo `json:"signatures"`
+				Features   featuresInfo   `json:"features"`
+			}
+			httpx.WriteJSON(w, 200, capabilities{
+				Protocol: protocolInfo{
+					Name:     "contractlane",
+					Versions: []string{"v1"},
+				},
+				Evidence: evidenceInfo{
+					BundleVersions:         []string{"evidence-v1"},
+					AlwaysPresentArtifacts: []string{"anchors", "webhook_receipts"},
+				},
+				Signatures: signaturesInfo{
+					Envelopes:  []string{"sig-v1"},
+					Algorithms: []string{"ed25519"},
+				},
+				Features: featuresInfo{
+					Webhooks:       true,
+					Anchors:        true,
+					StripeVerifier: true,
+					RFC3161:        true,
+					Delegation:     true,
+				},
+			})
+		})
 
 		// DEV helper to seed a template for smoke tests
 		api.Post("/dev/seed-template", func(w http.ResponseWriter, r *http.Request) {
@@ -723,6 +775,211 @@ func main() {
 			httpx.WriteJSON(w, 200, evidence)
 		})
 
+		api.Post("/contracts/{contract_id}/anchors", func(w http.ResponseWriter, r *http.Request) {
+			contractID := chi.URLParam(r, "contract_id")
+			agent, err := authn.AuthenticateAgentBearer(r.Context(), pool, r.Header.Get("Authorization"))
+			if err != nil {
+				httpx.WriteError(w, 401, "UNAUTHORIZED", "agent authentication required", nil)
+				return
+			}
+			allowed, delegated, err := authn.HasScopeOrDelegation(r.Context(), pool, agent, "cel.contracts:write", authn.DelegationContext{})
+			if err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			if !allowed {
+				authn.LogAuthFailure(r.Context(), pool, "cel", "POST /cel/contracts/{contract_id}/anchors", agent.PrincipalID, agent.ActorID, "INSUFFICIENT_SCOPE", map[string]any{"required_scope": "cel.contracts:write"})
+				httpx.WriteError(w, 403, "INSUFFICIENT_SCOPE", "agent lacks required scope", map[string]any{"required_scope": "cel.contracts:write"})
+				return
+			}
+			if delegated {
+				authn.LogAuthEvent(r.Context(), pool, "cel", "POST /cel/contracts/{contract_id}/anchors", agent.PrincipalID, agent.ActorID, "DELEGATION_USED", map[string]any{"required_scope": "cel.contracts:write"})
+			}
+			idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+			if idempotencyKey == "" {
+				httpx.WriteError(w, 400, "MISSING_IDEMPOTENCY_KEY", "Idempotency-Key header is required", nil)
+				return
+			}
+			c, err := st.GetContract(r.Context(), contractID)
+			if err != nil {
+				httpx.WriteError(w, 404, "NOT_FOUND", "contract not found", nil)
+				return
+			}
+			if c.PrincipalID != agent.PrincipalID {
+				httpx.WriteError(w, 404, "NOT_FOUND", "contract not found", nil)
+				return
+			}
+			var req struct {
+				Target     string         `json:"target"`
+				AnchorType string         `json:"anchor_type"`
+				Request    map[string]any `json:"request"`
+			}
+			if err := httpx.ReadJSON(r, &req); err != nil {
+				httpx.WriteError(w, 400, "BAD_JSON", err.Error(), nil)
+				return
+			}
+			req.Target = strings.TrimSpace(strings.ToLower(req.Target))
+			switch req.Target {
+			case "bundle_hash", "manifest_hash":
+			default:
+				httpx.WriteError(w, 400, "BAD_REQUEST", "target must be bundle_hash or manifest_hash", nil)
+				return
+			}
+			req.AnchorType = strings.TrimSpace(strings.ToLower(req.AnchorType))
+			if req.AnchorType == "" {
+				httpx.WriteError(w, 400, "BAD_REQUEST", "anchor_type is required", nil)
+				return
+			}
+			if req.Request == nil {
+				req.Request = map[string]any{}
+			}
+
+			actor := actorContext{
+				PrincipalID:    agent.PrincipalID,
+				ActorID:        agent.ActorID,
+				ActorType:      "AGENT",
+				IdempotencyKey: idempotencyKey,
+			}
+			endpoint := fmt.Sprintf("POST /cel/contracts/%s/anchors", contractID)
+			if replayed := replayIdempotentResponse(r.Context(), st, w, actor, endpoint); replayed {
+				return
+			}
+
+			evidence, err := buildContractEvidenceBundle(r.Context(), st, ial, c, evidenceIncludeSet{
+				render:     true,
+				signatures: true,
+				approvals:  true,
+				events:     true,
+				variables:  true,
+			}, "none")
+			if err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			hashes, _ := evidence["hashes"].(map[string]any)
+			targetHash := strings.TrimSpace(fmt.Sprint(hashes[req.Target]))
+			if targetHash == "" {
+				httpx.WriteError(w, 500, "ANCHOR_TARGET_HASH_MISSING", "failed to compute target hash", map[string]any{"target": req.Target})
+				return
+			}
+			now := time.Now().UTC()
+			if req.AnchorType != "dev_stub" && req.AnchorType != "rfc3161" {
+				httpx.WriteError(w, 400, "UNSUPPORTED_ANCHOR_TYPE", "anchor_type not supported in this deployment", nil)
+				return
+			}
+			status := "PENDING"
+			var anchoredAt *time.Time
+			proof := map[string]any{}
+			requestPayload := map[string]any{}
+			switch req.AnchorType {
+			case "dev_stub":
+				if strings.ToLower(strings.TrimSpace(os.Getenv("CEL_DEV_MODE"))) != "true" {
+					httpx.WriteError(w, 400, "UNSUPPORTED_ANCHOR_TYPE", "dev_stub anchoring is only allowed in dev mode", nil)
+					return
+				}
+				status = "CONFIRMED"
+				anchoredAt = &now
+				proof = map[string]any{
+					"dev_stub":    true,
+					"target":      req.Target,
+					"target_hash": targetHash,
+					"note":        "no external anchoring performed",
+				}
+				requestPayload = req.Request
+			case "rfc3161":
+				if req.Request != nil {
+					if tsaURL, ok := req.Request["tsa_url"].(string); ok && strings.TrimSpace(tsaURL) != "" {
+						requestPayload["tsa_url"] = strings.TrimSpace(tsaURL)
+					}
+					if policyOID, ok := req.Request["policy_oid"].(string); ok && strings.TrimSpace(policyOID) != "" {
+						requestPayload["policy_oid"] = strings.TrimSpace(policyOID)
+					}
+				}
+				status, proof, anchoredAt = performRFC3161Anchor(r.Context(), targetHash, requestPayload)
+			}
+			anchor, err := st.InsertAnchor(
+				r.Context(),
+				c.PrincipalID,
+				c.ContractID,
+				req.Target,
+				targetHash,
+				req.AnchorType,
+				status,
+				requestPayload,
+				proof,
+				anchoredAt,
+			)
+			if err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			resp := map[string]any{
+				"request_id": httpx.NewRequestID(),
+				"anchor": map[string]any{
+					"anchor_id":   anchor.AnchorID,
+					"target":      anchor.Target,
+					"target_hash": anchor.TargetHash,
+					"anchor_type": anchor.AnchorType,
+					"status":      anchor.Status,
+					"request":     anchor.Request,
+					"proof":       anchor.Proof,
+					"created_at":  anchor.CreatedAt.UTC().Format(time.RFC3339Nano),
+					"anchored_at": "",
+				},
+			}
+			if anchor.AnchoredAt != nil {
+				respAnchor := resp["anchor"].(map[string]any)
+				respAnchor["anchored_at"] = anchor.AnchoredAt.UTC().Format(time.RFC3339Nano)
+			}
+			responseStatus := 200
+			if req.AnchorType == "dev_stub" {
+				responseStatus = 201
+			}
+			if ok := saveAndWriteIdempotentResponse(r.Context(), st, w, actor, endpoint, responseStatus, resp); !ok {
+				return
+			}
+		})
+
+		api.Get("/contracts/{contract_id}/anchors", func(w http.ResponseWriter, r *http.Request) {
+			contractID := chi.URLParam(r, "contract_id")
+			agent, err := authn.AuthenticateAgentBearer(r.Context(), pool, r.Header.Get("Authorization"))
+			if err != nil {
+				httpx.WriteError(w, 401, "UNAUTHORIZED", "agent authentication required", nil)
+				return
+			}
+			allowed, delegated, err := authn.HasScopeOrDelegation(r.Context(), pool, agent, "cel.contracts:read", authn.DelegationContext{})
+			if err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			if !allowed {
+				authn.LogAuthFailure(r.Context(), pool, "cel", "GET /cel/contracts/{contract_id}/anchors", agent.PrincipalID, agent.ActorID, "INSUFFICIENT_SCOPE", map[string]any{"required_scope": "cel.contracts:read"})
+				httpx.WriteError(w, 403, "INSUFFICIENT_SCOPE", "agent lacks required scope", map[string]any{"required_scope": "cel.contracts:read"})
+				return
+			}
+			if delegated {
+				authn.LogAuthEvent(r.Context(), pool, "cel", "GET /cel/contracts/{contract_id}/anchors", agent.PrincipalID, agent.ActorID, "DELEGATION_USED", map[string]any{"required_scope": "cel.contracts:read"})
+			}
+			c, err := st.GetContract(r.Context(), contractID)
+			if err != nil {
+				httpx.WriteError(w, 404, "NOT_FOUND", "contract not found", nil)
+				return
+			}
+			if c.PrincipalID != agent.PrincipalID {
+				httpx.WriteError(w, 404, "NOT_FOUND", "contract not found", nil)
+				return
+			}
+			anchors, err := st.ListAnchorsForContractEvidence(r.Context(), c.PrincipalID, c.ContractID)
+			if err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			httpx.WriteJSON(w, 200, map[string]any{
+				"request_id": httpx.NewRequestID(),
+				"anchors":    anchors,
+			})
+		})
+
 		api.Post("/contracts", func(w http.ResponseWriter, r *http.Request) {
 			var req struct {
 				ActorContext     actorContext                 `json:"actor_context"`
@@ -1283,10 +1540,12 @@ func main() {
 		api.Post("/approvals/{approval_request_id}:decide", func(w http.ResponseWriter, r *http.Request) {
 			aprq := chi.URLParam(r, "approval_request_id")
 			var req struct {
-				ActorContext  actorContext   `json:"actor_context"`
-				Decision      string         `json:"decision"`
-				SignedPayload map[string]any `json:"signed_payload"`
-				Signature     map[string]any `json:"signature"`
+				ActorContext      actorContext           `json:"actor_context"`
+				Decision          string                 `json:"decision"`
+				SignedPayload     map[string]any         `json:"signed_payload"`
+				SignedPayloadHash string                 `json:"signed_payload_hash"`
+				Signature         map[string]any         `json:"signature"`
+				SignatureEnvelope signaturev1.EnvelopeV1 `json:"signature_envelope"`
 			}
 			if err := httpx.ReadJSON(r, &req); err != nil {
 				httpx.WriteError(w, 400, "BAD_JSON", err.Error(), nil)
@@ -1303,11 +1562,43 @@ func main() {
 				httpx.WriteError(w, 403, "HUMAN_ONLY", "only humans can decide approvals", nil)
 				return
 			}
-			valid, err := ial.VerifySignature(req.ActorContext.PrincipalID, req.ActorContext.ActorID, r.Header.Get("Authorization"))
-			if err != nil || !valid {
-				httpx.WriteError(w, 403, "BAD_SIGNATURE", "signature verification failed", nil)
+			signedPayloadHash, _, err := canonhash.SumObject(req.SignedPayload)
+			if err != nil {
+				httpx.WriteError(w, 500, "HASH_ERROR", err.Error(), nil)
 				return
 			}
+			signedPayloadHashHex := strings.TrimPrefix(signedPayloadHash, "sha256:")
+			if strings.TrimSpace(req.SignedPayloadHash) != "" {
+				claimedHashHex := normalizeHexHash(req.SignedPayloadHash)
+				if claimedHashHex == "" {
+					httpx.WriteError(w, 403, "BAD_SIGNATURE", "signed_payload_hash must be lowercase hex sha256", nil)
+					return
+				}
+				if subtle.ConstantTimeCompare([]byte(claimedHashHex), []byte(signedPayloadHashHex)) != 1 {
+					httpx.WriteError(w, 403, "BAD_SIGNATURE", "signed_payload_hash mismatch", nil)
+					return
+				}
+			}
+			useSigV1Envelope := strings.TrimSpace(req.SignatureEnvelope.Version) != "" ||
+				strings.TrimSpace(req.SignatureEnvelope.Algorithm) != "" ||
+				strings.TrimSpace(req.SignatureEnvelope.Signature) != ""
+			if useSigV1Envelope {
+				if ctx := strings.TrimSpace(req.SignatureEnvelope.Context); ctx != "" && ctx != "contract-action" {
+					httpx.WriteError(w, 403, "BAD_SIGNATURE", "signature envelope context must be contract-action", nil)
+					return
+				}
+				if _, err := signaturev1.VerifyEnvelopeV1(req.SignedPayload, req.SignatureEnvelope); err != nil {
+					httpx.WriteError(w, 403, "BAD_SIGNATURE", "signature envelope verification failed", map[string]any{"reason": err.Error()})
+					return
+				}
+			} else {
+				valid, err := ial.VerifySignature(req.ActorContext.PrincipalID, req.ActorContext.ActorID, r.Header.Get("Authorization"))
+				if err != nil || !valid {
+					httpx.WriteError(w, 403, "BAD_SIGNATURE", "signature verification failed", nil)
+					return
+				}
+			}
+
 			status, contractID, _, requiredRoles, err := st.GetApprovalRequest(r.Context(), aprq)
 			if err != nil {
 				httpx.WriteError(w, 404, "NOT_FOUND", err.Error(), nil)
@@ -1344,6 +1635,9 @@ func main() {
 				for k, v := range req.Signature {
 					signatureWithHashes[k] = v
 				}
+				if useSigV1Envelope {
+					signatureWithHashes["signature_envelope"] = signatureEnvelopeToMap(req.SignatureEnvelope)
+				}
 				signatureWithHashes["hashes"] = map[string]any{
 					"packet_hash": artifacts["packet_hash"],
 					"diff_hash":   artifacts["diff_hash"],
@@ -1353,11 +1647,6 @@ func main() {
 					"packet_input": artifacts["packet_input"],
 					"diff_input":   artifacts["diff_input"],
 					"risk_input":   artifacts["risk_input"],
-				}
-				signedPayloadHash, _, err := canonhash.SumObject(req.SignedPayload)
-				if err != nil {
-					httpx.WriteError(w, 500, "HASH_ERROR", err.Error(), nil)
-					return
 				}
 				if err := st.SaveApprovalDecision(r.Context(), aprq, req.ActorContext.ActorID, "APPROVE", req.SignedPayload, signedPayloadHash, signatureWithHashes); err != nil {
 					httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
@@ -1380,6 +1669,9 @@ func main() {
 			for k, v := range req.Signature {
 				signatureWithHashes[k] = v
 			}
+			if useSigV1Envelope {
+				signatureWithHashes["signature_envelope"] = signatureEnvelopeToMap(req.SignatureEnvelope)
+			}
 			signatureWithHashes["hashes"] = map[string]any{
 				"packet_hash": artifacts["packet_hash"],
 				"diff_hash":   artifacts["diff_hash"],
@@ -1389,11 +1681,6 @@ func main() {
 				"packet_input": artifacts["packet_input"],
 				"diff_input":   artifacts["diff_input"],
 				"risk_input":   artifacts["risk_input"],
-			}
-			signedPayloadHash, _, err := canonhash.SumObject(req.SignedPayload)
-			if err != nil {
-				httpx.WriteError(w, 500, "HASH_ERROR", err.Error(), nil)
-				return
 			}
 			if err := st.SaveApprovalDecision(r.Context(), aprq, req.ActorContext.ActorID, "REJECT", req.SignedPayload, signedPayloadHash, signatureWithHashes); err != nil {
 				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
@@ -2152,6 +2439,16 @@ func buildContractEvidenceBundle(
 		return nil, err
 	}
 	artifacts["delegation_records"] = delegations
+	webhookReceipts, err := st.ListVerifiedWebhookReceiptsForContractEvidence(ctx, c.PrincipalID, c.ContractID)
+	if err != nil {
+		return nil, err
+	}
+	artifacts["webhook_receipts"] = webhookReceipts
+	anchors, err := st.ListAnchorsForContractEvidence(ctx, c.PrincipalID, c.ContractID)
+	if err != nil {
+		return nil, err
+	}
+	artifacts["anchors"] = anchors
 
 	artifactList := make([]map[string]any, 0, len(artifacts))
 	for artifactType, payload := range artifacts {
@@ -2250,6 +2547,10 @@ func artifactIDForType(artifactType, contractID string) string {
 		return "idempotency:records"
 	case "delegation_records":
 		return "delegations:active"
+	case "webhook_receipts":
+		return "webhook_receipts.json"
+	case "anchors":
+		return "anchors.json"
 	default:
 		return artifactType
 	}
@@ -2523,6 +2824,107 @@ func normalizeEventPayload(v any) any {
 	default:
 		return v
 	}
+}
+
+func performRFC3161Anchor(ctx context.Context, targetHash string, requestPayload map[string]any) (status string, proof map[string]any, anchoredAt *time.Time) {
+	now := time.Now().UTC()
+	status = "FAILED"
+	proof = map[string]any{}
+
+	tsaURL := ""
+	if raw, ok := requestPayload["tsa_url"].(string); ok {
+		tsaURL = strings.TrimSpace(raw)
+	}
+	if tsaURL == "" {
+		tsaURL = strings.TrimSpace(os.Getenv("RFC3161_TSA_URL"))
+	}
+	if tsaURL == "" {
+		proof["error_code"] = "TSA_URL_REQUIRED"
+		return status, proof, nil
+	}
+	if !isAllowedTSAURL(tsaURL, os.Getenv("RFC3161_TSA_ALLOWLIST")) {
+		proof["error_code"] = "TSA_URL_NOT_ALLOWED"
+		return status, proof, nil
+	}
+
+	policyOID := ""
+	if raw, ok := requestPayload["policy_oid"].(string); ok {
+		policyOID = strings.TrimSpace(raw)
+	}
+	reqDER, err := anchorrfc3161.BuildTimeStampRequestFromHashHex(targetHash, policyOID)
+	if err != nil {
+		proof["error_code"] = "INVALID_TARGET_HASH"
+		return status, proof, nil
+	}
+	client := anchorrfc3161.NewClient(nil)
+	tokenBytes, contentType, err := client.RequestTimestampToken(ctx, tsaURL, reqDER)
+	if err != nil {
+		errCode := "TSA_REQUEST_FAILED"
+		if strings.HasPrefix(err.Error(), "tsa_http_status_") {
+			errCode = "TSA_HTTP_STATUS"
+		} else if err.Error() == "tsa_empty_response" {
+			errCode = "TSA_EMPTY_RESPONSE"
+		}
+		proof["error_code"] = errCode
+		return status, proof, nil
+	}
+
+	status = "CONFIRMED"
+	anchoredAt = &now
+	proof["rfc3161"] = true
+	proof["target_hash"] = targetHash
+	proof["timestamp_token_b64"] = base64.StdEncoding.EncodeToString(tokenBytes)
+	if contentType != "" {
+		proof["content_type"] = contentType
+	}
+	return status, proof, anchoredAt
+}
+
+func isAllowedTSAURL(url, allowlistRaw string) bool {
+	allowlistRaw = strings.TrimSpace(allowlistRaw)
+	if allowlistRaw == "" {
+		return true
+	}
+	for _, p := range strings.Split(allowlistRaw, ",") {
+		if strings.TrimSpace(p) == url {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeHexHash(v string) string {
+	s := strings.TrimSpace(strings.ToLower(v))
+	s = strings.TrimPrefix(s, "sha256:")
+	if s == "" {
+		return ""
+	}
+	if s != strings.ToLower(s) {
+		return ""
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != 32 {
+		return ""
+	}
+	return s
+}
+
+func signatureEnvelopeToMap(env signaturev1.EnvelopeV1) map[string]any {
+	out := map[string]any{
+		"version":      env.Version,
+		"algorithm":    env.Algorithm,
+		"public_key":   env.PublicKey,
+		"signature":    env.Signature,
+		"payload_hash": env.PayloadHash,
+		"issued_at":    env.IssuedAt,
+	}
+	if strings.TrimSpace(env.KeyID) != "" {
+		out["key_id"] = env.KeyID
+	}
+	if strings.TrimSpace(env.Context) != "" {
+		out["context"] = env.Context
+	}
+	return out
 }
 
 func requireAgentScope(r *http.Request, w http.ResponseWriter, pool *pgxpool.Pool, actor actorContext, endpoint, requiredScope string) bool {

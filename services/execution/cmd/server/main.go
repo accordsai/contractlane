@@ -22,6 +22,8 @@ import (
 
 func main() {
 	pool := db.MustConnect()
+	ingressStore := webhooks.NewStore(pool)
+	ingressHandler := webhooks.NewIngressHandler(ingressStore)
 
 	port := os.Getenv("SERVICE_PORT")
 	if port == "" {
@@ -30,6 +32,7 @@ func main() {
 
 	r := chi.NewRouter()
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	r.Post("/webhooks/{provider}/{endpoint_token}", ingressHandler.HandleIngress)
 
 	r.Route("/exec", func(api chi.Router) {
 		api.Post("/contracts/{contract_id}/sendForSignature", func(w http.ResponseWriter, r *http.Request) {

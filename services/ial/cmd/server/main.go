@@ -41,9 +41,14 @@ func main() {
 				httpx.WriteError(w, 404, "NOT_FOUND", "dev bootstrap disabled", nil)
 				return
 			}
-			principalID := strings.TrimSpace(os.Getenv("IAL_DEV_PRINCIPAL_ID"))
-			if principalID == "" {
-				principalID = "prn_dev_local"
+			devPrincipalInput := strings.TrimSpace(os.Getenv("IAL_DEV_PRINCIPAL_ID"))
+			if devPrincipalInput == "" {
+				devPrincipalInput = "prn_dev_local"
+			}
+			principalID := devPrincipalInput
+			if _, err := uuid.Parse(principalID); err != nil {
+				// Keep dev bootstrap deterministic while ensuring DB rows use UUID-compatible principal IDs.
+				principalID = uuid.NewSHA1(uuid.NameSpaceURL, []byte("contractlane/dev/principal/"+devPrincipalInput)).String()
 			}
 			principalName := strings.TrimSpace(os.Getenv("IAL_DEV_PRINCIPAL_NAME"))
 			if principalName == "" {
@@ -136,10 +141,11 @@ func main() {
 			httpx.WriteJSON(w, 200, map[string]any{
 				"request_id": httpx.NewRequestID(),
 				"principal": map[string]any{
-					"principal_id": principalID,
-					"name":         principalName,
-					"jurisdiction": principalJurisdiction,
-					"timezone":     principalTimezone,
+					"principal_id":    principalID,
+					"principal_alias": devPrincipalInput,
+					"name":            principalName,
+					"jurisdiction":    principalJurisdiction,
+					"timezone":        principalTimezone,
 				},
 				"agent": map[string]any{
 					"actor_id":     agentID,
@@ -154,6 +160,7 @@ func main() {
 					"required_template_id":       termsTemplateID,
 					"required_template_version":  termsTemplateVersion,
 					"bootstrap_principal_id":     principalID,
+					"bootstrap_principal_alias":  devPrincipalInput,
 					"bootstrap_created_by_actor": agentID,
 				},
 				"credentials": map[string]any{

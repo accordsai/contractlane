@@ -1,0 +1,7 @@
+{
+  "name": "settlement_delegation_root_issued_trust_pass",
+  "description": "Offline verifier accepts root-issued delegation only when issuer is trusted.",
+  "requires": [
+    "go test ./sdk/go/contractlane -run TestVerifySettlementProofV1_AuthorizationRootIssuedNeedsTrust -count=1"
+  ]
+}

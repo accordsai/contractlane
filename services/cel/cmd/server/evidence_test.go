@@ -1,6 +1,13 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"testing"
+)
 
 func TestParseEvidenceIncludeFlagsDefaultAll(t *testing.T) {
 	got, err := parseEvidenceIncludeFlags("")
@@ -82,5 +89,43 @@ func TestValidateEvidenceManifestCoverageRejectsMissingDescriptor(t *testing.T) 
 	}
 	if err := validateEvidenceManifestCoverage(artifacts, artifactList); err == nil {
 		t.Fatalf("expected missing descriptor validation error")
+	}
+}
+
+func TestPerformRFC3161AnchorConfirmed(t *testing.T) {
+	fixedToken := []byte("fixed-tsa-token")
+	tsa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/timestamp-reply")
+		_, _ = w.Write(fixedToken)
+	}))
+	defer tsa.Close()
+
+	t.Setenv("RFC3161_TSA_ALLOWLIST", tsa.URL)
+	status, proof, anchoredAt := performRFC3161Anchor(context.Background(), "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", map[string]any{
+		"tsa_url": tsa.URL,
+	})
+	if status != "CONFIRMED" {
+		t.Fatalf("expected CONFIRMED status, got %s with proof=%v", status, proof)
+	}
+	if anchoredAt == nil {
+		t.Fatalf("expected anchoredAt to be set")
+	}
+	if got := proof["timestamp_token_b64"]; got != base64.StdEncoding.EncodeToString(fixedToken) {
+		t.Fatalf("unexpected timestamp token proof value %v", got)
+	}
+}
+
+func TestPerformRFC3161AnchorFailedDeterministicCode(t *testing.T) {
+	_ = os.Unsetenv("RFC3161_TSA_URL")
+	_ = os.Unsetenv("RFC3161_TSA_ALLOWLIST")
+	status, proof, anchoredAt := performRFC3161Anchor(context.Background(), "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", map[string]any{})
+	if status != "FAILED" {
+		t.Fatalf("expected FAILED status, got %s", status)
+	}
+	if anchoredAt != nil {
+		t.Fatalf("expected nil anchoredAt for failed anchor")
+	}
+	if got := proof["error_code"]; got != "TSA_URL_REQUIRED" {
+		t.Fatalf("expected TSA_URL_REQUIRED error_code, got %v", got)
 	}
 }

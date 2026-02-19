@@ -1,0 +1,7 @@
+{
+  "name": "settlement_delegation_missing_fail",
+  "description": "Offline verifier fails when required delegation is missing.",
+  "requires": [
+    "go test ./sdk/go/contractlane -run TestVerifySettlementProofV1_AuthorizationMissingDelegationFails -count=1"
+  ]
+}

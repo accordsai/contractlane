@@ -1,0 +1,7 @@
+{
+  "name": "settlement_delegation_expired_fail",
+  "description": "Offline verifier fails when delegation validity window is expired.",
+  "requires": [
+    "go test ./sdk/go/contractlane -run TestVerifySettlementProofV1_AuthorizationExpiredDelegationFails -count=1"
+  ]
+}

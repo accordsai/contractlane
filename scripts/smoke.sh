@@ -20,14 +20,26 @@ curl_json() {
   local url="$2"
   local data="${3-}"
   local auth_header="${4-}"
+  local extra_header="${5-}"
   local tmp status
   tmp="$(mktemp)"
 
   if [[ -n "$data" ]]; then
-    if [[ -n "$auth_header" ]]; then
+    if [[ -n "$auth_header" && -n "$extra_header" ]]; then
       status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" \
       -H 'content-type: application/json' \
       -H "$auth_header" \
+      -H "$extra_header" \
+      -d "$data")"
+    elif [[ -n "$auth_header" ]]; then
+      status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" \
+      -H 'content-type: application/json' \
+      -H "$auth_header" \
+      -d "$data")"
+    elif [[ -n "$extra_header" ]]; then
+      status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" \
+      -H 'content-type: application/json' \
+      -H "$extra_header" \
       -d "$data")"
     else
       status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" \
@@ -35,8 +47,12 @@ curl_json() {
       -d "$data")"
     fi
   else
-    if [[ -n "$auth_header" ]]; then
+    if [[ -n "$auth_header" && -n "$extra_header" ]]; then
+      status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" -H "$auth_header" -H "$extra_header")"
+    elif [[ -n "$auth_header" ]]; then
       status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" -H "$auth_header")"
+    elif [[ -n "$extra_header" ]]; then
+      status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" -H "$extra_header")"
     else
       status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url")"
     fi
@@ -60,18 +76,27 @@ curl_json_expect_status() {
   local url="$3"
   local data="${4-}"
   local auth_header="${5-}"
+  local extra_header="${6-}"
   local tmp status
   tmp="$(mktemp)"
 
   if [[ -n "$data" ]]; then
-    if [[ -n "$auth_header" ]]; then
+    if [[ -n "$auth_header" && -n "$extra_header" ]]; then
+      status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" -H 'content-type: application/json' -H "$auth_header" -H "$extra_header" -d "$data")"
+    elif [[ -n "$auth_header" ]]; then
       status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" -H 'content-type: application/json' -H "$auth_header" -d "$data")"
+    elif [[ -n "$extra_header" ]]; then
+      status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" -H 'content-type: application/json' -H "$extra_header" -d "$data")"
     else
       status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" -H 'content-type: application/json' -d "$data")"
     fi
   else
-    if [[ -n "$auth_header" ]]; then
+    if [[ -n "$auth_header" && -n "$extra_header" ]]; then
+      status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" -H "$auth_header" -H "$extra_header")"
+    elif [[ -n "$auth_header" ]]; then
       status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" -H "$auth_header")"
+    elif [[ -n "$extra_header" ]]; then
+      status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url" -H "$extra_header")"
     else
       status="$(curl -sS -o "$tmp" -w '%{http_code}' -X "$method" "$url")"
     fi
@@ -91,6 +116,68 @@ curl_json_expect_status() {
 
 canon_json() {
   jq -cS . <<<"$1"
+}
+
+gen_sig_v1_envelope() {
+  local payload_json="$1"
+  local tmp
+  tmp="scripts/sigv1_tmp_$RANDOM$RANDOM.go"
+  cat >"$tmp" <<'EOF'
+package main
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"time"
+)
+
+func main() {
+	if len(os.Args) != 2 {
+		fmt.Fprintln(os.Stderr, "usage: gen-sigv1 <payload-json>")
+		os.Exit(2)
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(os.Args[1]), &payload); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(2)
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(2)
+	}
+	sum := sha256.Sum256(b)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(2)
+	}
+	sig := ed25519.Sign(priv, sum[:])
+	env := map[string]any{
+		"version":      "sig-v1",
+		"algorithm":    "ed25519",
+		"public_key":   base64.StdEncoding.EncodeToString(pub),
+		"signature":    base64.StdEncoding.EncodeToString(sig),
+		"payload_hash": hex.EncodeToString(sum[:]),
+		"issued_at":    time.Now().UTC().Format(time.RFC3339Nano),
+		"context":      "contract-action",
+	}
+	out, err := json.Marshal(env)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(2)
+	}
+	fmt.Print(string(out))
+}
+EOF
+  go run "$tmp" "$payload_json"
+  rm -f "$tmp"
 }
 
 assert_json_equal() {
@@ -173,7 +260,7 @@ echo "principal_id=$PRN"
 
 echo "== Create agent =="
 AGENT="$(curl_json POST "$BASE_IAL/actors/agents" \
-  "{\"principal_id\":\"$PRN\",\"name\":\"DealBot\",\"auth\":{\"mode\":\"HMAC\",\"scopes\":[\"cel.contracts:write\",\"exec.signatures:send\"]}}")"
+  "{\"principal_id\":\"$PRN\",\"name\":\"DealBot\",\"auth\":{\"mode\":\"HMAC\",\"scopes\":[\"cel.contracts:write\",\"cel.contracts:read\",\"exec.signatures:send\"]}}")"
 AGT="$(echo "$AGENT" | jq -er '.agent.actor_id')"
 AGENT_TOKEN="$(echo "$AGENT" | jq -er '.credentials.token')"
 AGENT_AUTH="Authorization: Bearer $AGENT_TOKEN"
@@ -286,7 +373,7 @@ PRINCIPAL_T2="$(curl_json POST "$BASE_IAL/principals" \
   '{"name":"Other Inc","jurisdiction":"US","timezone":"America/New_York"}')"
 PRN_T2="$(echo "$PRINCIPAL_T2" | jq -er '.principal.principal_id')"
 AGENT_T2="$(curl_json POST "$BASE_IAL/actors/agents" \
-  "{\"principal_id\":\"$PRN_T2\",\"name\":\"OtherBot\",\"auth\":{\"mode\":\"HMAC\",\"scopes\":[\"cel.contracts:write\",\"exec.signatures:send\"]}}")"
+  "{\"principal_id\":\"$PRN_T2\",\"name\":\"OtherBot\",\"auth\":{\"mode\":\"HMAC\",\"scopes\":[\"cel.contracts:write\",\"cel.contracts:read\",\"exec.signatures:send\"]}}")"
 AGENT_T2_TOKEN="$(echo "$AGENT_T2" | jq -er '.credentials.token')"
 AGENT_T2_ID="$(echo "$AGENT_T2" | jq -er '.agent.actor_id')"
 AGENT_T2_AUTH="Authorization: Bearer $AGENT_T2_TOKEN"
@@ -465,11 +552,55 @@ CTR_EVIDENCE_BUNDLE_VERSION="$(echo "$CTR_EVIDENCE" | jq -er '.bundle_version')"
 CTR_EVIDENCE_BH="$(echo "$CTR_EVIDENCE" | jq -er '.hashes.bundle_hash')"
 CTR_EVIDENCE_HAS_CONTRACT="$(echo "$CTR_EVIDENCE" | jq -er '[.manifest.artifacts[] | select(.artifact_type=="contract_record")] | length')"
 CTR_EVIDENCE_HAS_RENDER="$(echo "$CTR_EVIDENCE" | jq -er '[.manifest.artifacts[] | select(.artifact_type=="render")] | length')"
+CTR_EVIDENCE_HAS_WEBHOOKS="$(echo "$CTR_EVIDENCE" | jq -er '[.manifest.artifacts[] | select(.artifact_type=="webhook_receipts")] | length')"
+CTR_EVIDENCE_WEBHOOKS_IS_ARRAY="$(echo "$CTR_EVIDENCE" | jq -er '.artifacts.webhook_receipts | type')"
+CTR_EVIDENCE_HAS_ANCHORS="$(echo "$CTR_EVIDENCE" | jq -er '[.manifest.artifacts[] | select(.artifact_type=="anchors")] | length')"
+CTR_EVIDENCE_ANCHORS_IS_ARRAY="$(echo "$CTR_EVIDENCE" | jq -er '.artifacts.anchors | type')"
 [[ "$CTR_EVIDENCE_CID" == "$PLAT_V2_CONTRACT_ID" ]] || { echo "Expected contract evidence to reference requested contract"; exit 1; }
 [[ "$CTR_EVIDENCE_BUNDLE_VERSION" == "evidence-v1" ]] || { echo "Expected evidence-v1 bundle, got $CTR_EVIDENCE_BUNDLE_VERSION"; exit 1; }
 [[ "$CTR_EVIDENCE_BH" == sha256:* ]] || { echo "Expected bundle_hash in contract evidence"; exit 1; }
 [[ "$CTR_EVIDENCE_HAS_CONTRACT" -ge 1 ]] || { echo "Expected contract_record artifact"; exit 1; }
 [[ "$CTR_EVIDENCE_HAS_RENDER" -ge 1 ]] || { echo "Expected render artifact"; exit 1; }
+[[ "$CTR_EVIDENCE_HAS_WEBHOOKS" -ge 1 ]] || { echo "Expected webhook_receipts artifact"; exit 1; }
+[[ "$CTR_EVIDENCE_WEBHOOKS_IS_ARRAY" == "array" ]] || { echo "Expected webhook_receipts payload to be array"; exit 1; }
+[[ "$CTR_EVIDENCE_HAS_ANCHORS" -ge 1 ]] || { echo "Expected anchors artifact"; exit 1; }
+[[ "$CTR_EVIDENCE_ANCHORS_IS_ARRAY" == "array" ]] || { echo "Expected anchors payload to be array"; exit 1; }
+
+echo "== Proof anchors =="
+ANCHORS_LIST_BEFORE="$(curl_json GET "$BASE_CEL/contracts/$PLAT_V2_CONTRACT_ID/anchors" "" "$AGENT_AUTH")"
+ANCHORS_LIST_BEFORE_COUNT="$(echo "$ANCHORS_LIST_BEFORE" | jq -er '.anchors | length')"
+ANCHOR_RFC3161_CREATE="$(curl_json_expect_status 200 POST "$BASE_CEL/contracts/$PLAT_V2_CONTRACT_ID/anchors" \
+  '{"target":"bundle_hash","anchor_type":"rfc3161","request":{"tsa_url":"https://tsa.example.invalid","policy_oid":"1.2.3.4.5","ignored":"x"}}' \
+  "$AGENT_AUTH" \
+  "Idempotency-Key: anc-rfc3161-$RUN_ID")"
+ANCHOR_RFC3161_STATUS="$(echo "$ANCHOR_RFC3161_CREATE" | jq -er '.anchor.status')"
+ANCHOR_RFC3161_TYPE="$(echo "$ANCHOR_RFC3161_CREATE" | jq -er '.anchor.anchor_type')"
+if [[ "$ANCHOR_RFC3161_STATUS" == "FAILED" ]]; then
+  ANCHOR_RFC3161_ERROR="$(echo "$ANCHOR_RFC3161_CREATE" | jq -er '.anchor.proof.error_code')"
+  [[ -n "$ANCHOR_RFC3161_ERROR" ]] || { echo "Expected deterministic error_code for failed rfc3161 anchor"; exit 1; }
+elif [[ "$ANCHOR_RFC3161_STATUS" == "CONFIRMED" ]]; then
+  ANCHOR_RFC3161_TOKEN="$(echo "$ANCHOR_RFC3161_CREATE" | jq -er '.anchor.proof.timestamp_token_b64')"
+  [[ -n "$ANCHOR_RFC3161_TOKEN" ]] || { echo "Expected timestamp_token_b64 for confirmed rfc3161 anchor"; exit 1; }
+else
+  echo "Expected FAILED or CONFIRMED rfc3161 anchor, got $ANCHOR_RFC3161_CREATE"
+  exit 1
+fi
+[[ "$ANCHOR_RFC3161_TYPE" == "rfc3161" ]] || { echo "Expected rfc3161 anchor type, got $ANCHOR_RFC3161_CREATE"; exit 1; }
+ANCHORS_LIST_AFTER_RFC3161="$(curl_json GET "$BASE_CEL/contracts/$PLAT_V2_CONTRACT_ID/anchors" "" "$AGENT_AUTH")"
+ANCHORS_LIST_AFTER_RFC3161_COUNT="$(echo "$ANCHORS_LIST_AFTER_RFC3161" | jq -er '.anchors | length')"
+[[ "$ANCHORS_LIST_AFTER_RFC3161_COUNT" -eq $((ANCHORS_LIST_BEFORE_COUNT + 1)) ]] || { echo "Expected one new rfc3161 anchor row"; exit 1; }
+
+ANCHOR_CREATE="$(curl_json POST "$BASE_CEL/contracts/$PLAT_V2_CONTRACT_ID/anchors" \
+  '{"target":"bundle_hash","anchor_type":"dev_stub","request":{"source":"smoke"}}' \
+  "$AGENT_AUTH" \
+  "Idempotency-Key: anc-$RUN_ID")"
+ANCHOR_STATUS="$(echo "$ANCHOR_CREATE" | jq -er '.anchor.status')"
+ANCHOR_DEV_STUB="$(echo "$ANCHOR_CREATE" | jq -er '.anchor.proof.dev_stub')"
+[[ "$ANCHOR_STATUS" == "CONFIRMED" ]] || { echo "Expected confirmed dev stub anchor, got $ANCHOR_CREATE"; exit 1; }
+[[ "$ANCHOR_DEV_STUB" == "true" ]] || { echo "Expected dev_stub proof marker in anchor response"; exit 1; }
+ANCHORS_LIST="$(curl_json GET "$BASE_CEL/contracts/$PLAT_V2_CONTRACT_ID/anchors" "" "$AGENT_AUTH")"
+ANCHORS_LIST_COUNT="$(echo "$ANCHORS_LIST" | jq -er '.anchors | length')"
+[[ "$ANCHORS_LIST_COUNT" -ge 1 ]] || { echo "Expected at least one anchor in list response"; exit 1; }
 
 # Cross-tenant evidence read denied.
 curl_json_expect_status 404 GET "$BASE_CEL/contracts/$PLAT_V2_CONTRACT_ID/evidence" "" "$AGENT_T2_AUTH" >/dev/null
@@ -531,7 +662,19 @@ NST2="$(echo "$RES3" | jq -er '.next_step.type')"
 [[ "$NST2" == "APPROVE_ACTION" ]] || { echo "Expected APPROVE_ACTION, got $RES3"; exit 1; }
 APRQ="$(echo "$RES3" | jq -er '.next_step.approval_request_id')"
 
-AD_REQ="{\"actor_context\":{\"principal_id\":\"$PRN\",\"actor_id\":\"$ACT_H\",\"actor_type\":\"HUMAN\",\"idempotency_key\":\"ad1-$RUN_ID\"},\"decision\":\"APPROVE\",\"signed_payload\":{\"contract_id\":\"$CID\",\"approval_request_id\":\"$APRQ\",\"packet_hash\":\"sha256:dev\",\"diff_hash\":\"sha256:dev\",\"risk_hash\":\"sha256:dev\",\"nonce\":\"n1-$RUN_ID\"},\"signature\":{\"type\":\"WEBAUTHN_ASSERTION\",\"assertion_response\":{}}}"
+SIGNED_PAYLOAD="$(jq -cn \
+  --arg cid "$CID" \
+  --arg aprq "$APRQ" \
+  --arg nonce "n1-$RUN_ID" \
+  '{contract_id:$cid,approval_request_id:$aprq,packet_hash:"sha256:dev",diff_hash:"sha256:dev",risk_hash:"sha256:dev",nonce:$nonce}')"
+SIG_V1_ENVELOPE="$(gen_sig_v1_envelope "$SIGNED_PAYLOAD")"
+AD_REQ="$(jq -cn \
+  --arg prn "$PRN" \
+  --arg act "$ACT_H" \
+  --arg idem "ad1-$RUN_ID" \
+  --argjson signed_payload "$SIGNED_PAYLOAD" \
+  --argjson signature_envelope "$SIG_V1_ENVELOPE" \
+  '{actor_context:{principal_id:$prn,actor_id:$act,actor_type:"HUMAN",idempotency_key:$idem},decision:"APPROVE",signed_payload:$signed_payload,signature_envelope:$signature_envelope}')"
 WRONG_ROLE_AD_REQ="{\"actor_context\":{\"principal_id\":\"$PRN\",\"actor_id\":\"$ACT_WRONG\",\"actor_type\":\"HUMAN\"},\"decision\":\"APPROVE\",\"signed_payload\":{\"contract_id\":\"$CID\",\"approval_request_id\":\"$APRQ\",\"packet_hash\":\"sha256:dev\",\"diff_hash\":\"sha256:dev\",\"risk_hash\":\"sha256:dev\",\"nonce\":\"n-wrong-$RUN_ID\"},\"signature\":{\"type\":\"WEBAUTHN_ASSERTION\",\"assertion_response\":{}}}"
 curl_json_expect_status 403 POST "$BASE_CEL/approvals/$APRQ:decide" "$WRONG_ROLE_AD_REQ"
 AD1="$(curl_json POST "$BASE_CEL/approvals/$APRQ:decide" "$AD_REQ" "$HUMAN_AUTH")"
@@ -577,6 +720,9 @@ STATE2="$(echo "$CTR_EFFECTIVE" | jq -er '.contract.state')"
 APPROVALS="$(curl_json GET "$BASE_CEL/contracts/$CID/approvals")"
 APPROVAL_COUNT="$(echo "$APPROVALS" | jq -er '.approval_requests | length')"
 [[ "$APPROVAL_COUNT" == "1" ]] || { echo "Expected 1 approval request, got $APPROVAL_COUNT"; exit 1; }
+CID_EVIDENCE="$(curl_json GET "$BASE_CEL/contracts/$CID/evidence" "" "$AGENT_AUTH")"
+SIG_V1_IN_EVIDENCE="$(echo "$CID_EVIDENCE" | jq -er --arg aprq "$APRQ" '[.artifacts.approval_decisions[] | select(.approval_request_id==$aprq) | .signature_object.signature_envelope.version == "sig-v1"] | any')"
+[[ "$SIG_V1_IN_EVIDENCE" == "true" ]] || { echo "Expected sig-v1 signature envelope in evidence approval decision"; exit 1; }
 
 EVENTS="$(curl_json GET "$BASE_CEL/contracts/$CID/events")"
 CREATED_COUNT="$(echo "$EVENTS" | jq -er '[.events[] | select(.type=="CREATED")] | length')"

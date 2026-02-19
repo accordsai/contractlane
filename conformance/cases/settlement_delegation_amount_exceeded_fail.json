@@ -1,0 +1,7 @@
+{
+  "name": "settlement_delegation_amount_exceeded_fail",
+  "description": "Offline verifier fails when proof payment amount exceeds delegation max_amount.",
+  "requires": [
+    "go test ./sdk/go/contractlane -run TestVerifySettlementProofV1_AuthorizationAmountExceededFails -count=1"
+  ]
+}

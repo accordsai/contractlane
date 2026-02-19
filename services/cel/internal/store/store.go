@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"contractlane/pkg/domain"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -534,7 +536,7 @@ ORDER BY created_at ASC, approval_request_id ASC
 		if decidedAt != nil {
 			row["decided_at"] = decidedAt.UTC().Format(time.RFC3339)
 		} else {
-		    row["decided_at"] = nil
+			row["decided_at"] = nil
 		}
 		out = append(out, row)
 	}
@@ -747,6 +749,65 @@ ORDER BY issued_at ASC, delegation_id ASC
 	return out, rows.Err()
 }
 
+func (s *Store) ListVerifiedWebhookReceiptsForContractEvidence(ctx context.Context, principalID, contractID string) ([]map[string]any, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT receipt_id::text,provider,event_type,provider_event_id,received_at,request_method,request_path,
+       raw_body_sha256,headers_sha256,request_sha256,signature_scheme,signature_details,linked_action
+FROM webhook_receipts_v2
+WHERE principal_id::text=$1
+  AND linked_contract_id::text=$2
+  AND signature_valid=true
+ORDER BY received_at ASC, provider ASC, COALESCE(provider_event_id,'') ASC, receipt_id ASC
+`, principalID, contractID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]map[string]any, 0)
+	for rows.Next() {
+		var receiptID, provider, eventType, requestMethod, requestPath string
+		var providerEventID, linkedAction *string
+		var receivedAt time.Time
+		var rawBodySHA256, headersSHA256, requestSHA256, signatureScheme string
+		var signatureDetailsB []byte
+		if err := rows.Scan(
+			&receiptID, &provider, &eventType, &providerEventID, &receivedAt, &requestMethod, &requestPath,
+			&rawBodySHA256, &headersSHA256, &requestSHA256, &signatureScheme, &signatureDetailsB, &linkedAction,
+		); err != nil {
+			return nil, err
+		}
+		var signatureDetails any = map[string]any{}
+		if len(signatureDetailsB) > 0 {
+			if err := json.Unmarshal(signatureDetailsB, &signatureDetails); err != nil {
+				return nil, err
+			}
+		}
+		row := map[string]any{
+			"receipt_id":        receiptID,
+			"provider":          provider,
+			"event_type":        eventType,
+			"provider_event_id": "",
+			"received_at":       receivedAt.UTC().Format(time.RFC3339Nano),
+			"request_method":    requestMethod,
+			"request_path":      requestPath,
+			"raw_body_sha256":   rawBodySHA256,
+			"headers_sha256":    headersSHA256,
+			"request_sha256":    requestSHA256,
+			"signature_scheme":  signatureScheme,
+			"signature_details": signatureDetails,
+			"linked_action":     "",
+		}
+		if providerEventID != nil {
+			row["provider_event_id"] = *providerEventID
+		}
+		if linkedAction != nil {
+			row["linked_action"] = *linkedAction
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListApprovalDecisionsForEvidence(ctx context.Context, contractID string) ([]map[string]any, error) {
 	rows, err := s.DB.Query(ctx, `
 SELECT ad.approval_request_id,ad.actor_id,ad.decision,ad.decided_at,ad.signed_payload,ad.signed_payload_hash,ad.signature_type,ad.signature_object
@@ -773,31 +834,31 @@ ORDER BY ad.decided_at ASC, ad.approval_request_id ASC, ad.actor_id ASC
 		_ = json.Unmarshal(signedPayloadB, &signedPayloadObj)
 		_ = json.Unmarshal(signatureObjB, &signatureObj)
 		/*
-		out = append(out, map[string]any{
+			out = append(out, map[string]any{
+				"approval_request_id": approvalRequestID,
+				"actor_id":            actorID,
+				"decision":            decision,
+				"decided_at":          decidedAt,
+				"signed_payload":      signedPayloadObj,
+				"signed_payload_hash": signedPayloadHash,
+				"signature_type":      signatureType,
+				"signature_object":    signatureObj,
+			})
+		*/
+		row := map[string]any{
 			"approval_request_id": approvalRequestID,
 			"actor_id":            actorID,
 			"decision":            decision,
-			"decided_at":          decidedAt,
 			"signed_payload":      signedPayloadObj,
 			"signed_payload_hash": signedPayloadHash,
 			"signature_type":      signatureType,
 			"signature_object":    signatureObj,
-		})
-		*/
-		row := map[string]any{
-		  "approval_request_id": approvalRequestID,
-		  "actor_id":            actorID,
-		  "decision":            decision,
-		  "signed_payload":      signedPayloadObj,
-		  "signed_payload_hash": signedPayloadHash,
-		  "signature_type":      signatureType,
-		  "signature_object":    signatureObj,
 		}
 
 		if decidedAt != nil {
-		  row["decided_at"] = decidedAt.UTC().Format(time.RFC3339)
+			row["decided_at"] = decidedAt.UTC().Format(time.RFC3339)
 		} else {
-		  row["decided_at"] = nil
+			row["decided_at"] = nil
 		}
 
 		out = append(out, row)
@@ -954,4 +1015,166 @@ WHERE contract_id=$1
 		"diff_hash":    diffHash,
 		"risk_hash":    riskHash,
 	}, nil
+}
+
+type AnchorRecord struct {
+	AnchorID   string
+	Target     string
+	TargetHash string
+	AnchorType string
+	Status     string
+	Request    map[string]any
+	Proof      map[string]any
+	CreatedAt  time.Time
+	AnchoredAt *time.Time
+}
+
+func (s *Store) InsertAnchor(
+	ctx context.Context,
+	principalID, contractID, target, targetHash, anchorType, status string,
+	request, proof map[string]any,
+	anchoredAt *time.Time,
+) (AnchorRecord, error) {
+	principalUUID, err := parseResourceUUID(principalID)
+	if err != nil {
+		return AnchorRecord{}, err
+	}
+	contractUUID, err := parseResourceUUID(contractID)
+	if err != nil {
+		return AnchorRecord{}, err
+	}
+	requestJSON, err := json.Marshal(request)
+	if err != nil {
+		return AnchorRecord{}, err
+	}
+	proofJSON, err := json.Marshal(proof)
+	if err != nil {
+		return AnchorRecord{}, err
+	}
+
+	var out AnchorRecord
+	var reqB, proofB []byte
+	err = s.DB.QueryRow(ctx, `
+INSERT INTO anchors_v1(
+  principal_id,contract_id,target,target_hash,anchor_type,status,request,proof,anchored_at
+)
+VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9)
+RETURNING anchor_id::text,target,target_hash,anchor_type,status,request,proof,created_at,anchored_at
+`, principalUUID, contractUUID, target, targetHash, anchorType, status, string(requestJSON), string(proofJSON), anchoredAt).Scan(
+		&out.AnchorID, &out.Target, &out.TargetHash, &out.AnchorType, &out.Status, &reqB, &proofB, &out.CreatedAt, &out.AnchoredAt,
+	)
+	if err != nil {
+		return AnchorRecord{}, err
+	}
+	out.Request = map[string]any{}
+	out.Proof = map[string]any{}
+	if len(reqB) > 0 {
+		if err := json.Unmarshal(reqB, &out.Request); err != nil {
+			return AnchorRecord{}, err
+		}
+	}
+	if len(proofB) > 0 {
+		if err := json.Unmarshal(proofB, &out.Proof); err != nil {
+			return AnchorRecord{}, err
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) ListAnchorsForContract(ctx context.Context, principalID, contractID string) ([]AnchorRecord, error) {
+	principalUUID, err := parseResourceUUID(principalID)
+	if err != nil {
+		return nil, err
+	}
+	contractUUID, err := parseResourceUUID(contractID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.Query(ctx, `
+SELECT anchor_id::text,target,target_hash,anchor_type,status,request,proof,created_at,anchored_at
+FROM anchors_v1
+WHERE principal_id=$1
+  AND contract_id=$2
+ORDER BY created_at ASC, anchor_id ASC
+`, principalUUID, contractUUID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]AnchorRecord, 0)
+	for rows.Next() {
+		var row AnchorRecord
+		var reqB, proofB []byte
+		if err := rows.Scan(
+			&row.AnchorID, &row.Target, &row.TargetHash, &row.AnchorType, &row.Status, &reqB, &proofB, &row.CreatedAt, &row.AnchoredAt,
+		); err != nil {
+			return nil, err
+		}
+		row.Request = map[string]any{}
+		row.Proof = map[string]any{}
+		if len(reqB) > 0 {
+			if err := json.Unmarshal(reqB, &row.Request); err != nil {
+				return nil, err
+			}
+		}
+		if len(proofB) > 0 {
+			if err := json.Unmarshal(proofB, &row.Proof); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListAnchorsForContractEvidence(ctx context.Context, principalID, contractID string) ([]map[string]any, error) {
+	// Evidence export must remain available for legacy/dev identifiers that are not UUID-compatible.
+	// anchors_v1 is UUID-keyed, so non-UUID principal/contract IDs cannot have anchor rows; return [] deterministically.
+	if _, err := parseResourceUUID(principalID); err != nil {
+		return []map[string]any{}, nil
+	}
+	if _, err := parseResourceUUID(contractID); err != nil {
+		return []map[string]any{}, nil
+	}
+	anchors, err := s.ListAnchorsForContract(ctx, principalID, contractID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(anchors))
+	for _, a := range anchors {
+		row := map[string]any{
+			"anchor_id":   a.AnchorID,
+			"target":      a.Target,
+			"target_hash": a.TargetHash,
+			"anchor_type": a.AnchorType,
+			"status":      a.Status,
+			"request":     a.Request,
+			"proof":       a.Proof,
+			"created_at":  a.CreatedAt.UTC().Format(time.RFC3339Nano),
+			"anchored_at": "",
+		}
+		if a.AnchoredAt != nil {
+			row["anchored_at"] = a.AnchoredAt.UTC().Format(time.RFC3339Nano)
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+func parseResourceUUID(id string) (uuid.UUID, error) {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return uuid.Nil, fmt.Errorf("empty identifier")
+	}
+	if u, err := uuid.Parse(trimmed); err == nil {
+		return u, nil
+	}
+	parts := strings.SplitN(trimmed, "_", 2)
+	if len(parts) == 2 {
+		if u, err := uuid.Parse(parts[1]); err == nil {
+			return u, nil
+		}
+	}
+	return uuid.Nil, fmt.Errorf("identifier %q is not uuid-compatible", id)
 }

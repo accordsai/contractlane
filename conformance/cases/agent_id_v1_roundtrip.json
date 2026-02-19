@@ -1,0 +1,13 @@
+{
+  "case": "agent_id_v1_roundtrip",
+  "description": "Offline conformance vector for agent-id-v1 generation/parsing",
+  "public_key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "expected_agent_id": "agent:pk:ed25519:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "invalid_agent_ids": [
+    "Agent:pk:ed25519:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "agent:pk:rsa:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "agent:pk:ed25519:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "agent:pk:ed25519:AAECAwQF$gcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "agent:pk:ed25519:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHg"
+  ]
+}

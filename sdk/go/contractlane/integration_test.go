@@ -118,6 +118,8 @@ func TestContractEvidenceManifestHashRulesLive(t *testing.T) {
 		t.Fatalf("manifest.artifacts is empty")
 	}
 	foundDelegations := false
+	foundWebhookReceipts := false
+	foundAnchors := false
 	for _, raw := range descs {
 		d, ok := raw.(map[string]any)
 		if !ok {
@@ -125,6 +127,12 @@ func TestContractEvidenceManifestHashRulesLive(t *testing.T) {
 		}
 		if fmt.Sprint(d["artifact_type"]) == "delegation_records" {
 			foundDelegations = true
+		}
+		if fmt.Sprint(d["artifact_type"]) == "webhook_receipts" {
+			foundWebhookReceipts = true
+		}
+		if fmt.Sprint(d["artifact_type"]) == "anchors" {
+			foundAnchors = true
 		}
 		hashOf := strings.TrimSpace(fmt.Sprint(d["hash_of"]))
 		hashRule := strings.TrimSpace(fmt.Sprint(d["hash_rule"]))
@@ -147,6 +155,26 @@ func TestContractEvidenceManifestHashRulesLive(t *testing.T) {
 	}
 	if !foundDelegations {
 		t.Fatalf("expected delegation_records artifact descriptor in evidence manifest")
+	}
+	if !foundWebhookReceipts {
+		t.Fatalf("expected webhook_receipts artifact descriptor in evidence manifest")
+	}
+	if !foundAnchors {
+		t.Fatalf("expected anchors artifact descriptor in evidence manifest")
+	}
+	webhookReceiptsRaw, ok := evidence["webhook_receipts"]
+	if !ok {
+		t.Fatalf("expected artifacts.webhook_receipts payload")
+	}
+	if _, ok := webhookReceiptsRaw.([]any); !ok {
+		t.Fatalf("expected webhook_receipts payload to be array, got %T", webhookReceiptsRaw)
+	}
+	anchorsRaw, ok := evidence["anchors"]
+	if !ok {
+		t.Fatalf("expected artifacts.anchors payload")
+	}
+	if _, ok := anchorsRaw.([]any); !ok {
+		t.Fatalf("expected anchors payload to be array, got %T", anchorsRaw)
 	}
 	rawEvidence, err := json.Marshal(evidence)
 	if err != nil {
@@ -175,7 +203,7 @@ func setupLiveEnv(t *testing.T) liveEnv {
 		"name":         "SDKGoAgent",
 		"auth": map[string]any{
 			"mode":   "HMAC",
-			"scopes": []string{"cel.contracts:write", "exec.signatures:send"},
+			"scopes": []string{"cel.contracts:write", "cel.contracts:read", "exec.signatures:send"},
 		},
 	})
 	agentObj := agent["agent"].(map[string]any)

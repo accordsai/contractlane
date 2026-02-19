@@ -1,0 +1,7 @@
+{
+  "name": "evidence_contains_anchors_and_receipts",
+  "description": "Fetch contract evidence and assert anchors and webhook_receipts artifacts are present and arrays.",
+  "requires": [
+    "GET /cel/contracts/{id}/evidence?format=json"
+  ]
+}

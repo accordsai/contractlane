@@ -1,0 +1,7 @@
+{
+  "name": "settlement_delegation_self_issued_pass",
+  "description": "Offline settlement proof verification passes with valid self-issued delegation.",
+  "requires": [
+    "cmd/clctl proof verify --evidence conformance/fixtures/agent-commerce-offline/evidence.json --proof conformance/fixtures/agent-commerce-offline/settlement_proof.json"
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "sig_v1_approval_happy_path",
+  "description": "Create a contract, route approval, decide using signature_envelope sig-v1 ed25519, and assert approval succeeds.",
+  "requires": [
+    "POST /cel/contracts",
+    "POST /cel/contracts/{id}/approvals:route",
+    "POST /cel/approvals/{approval_request_id}:decide"
+  ]
+}

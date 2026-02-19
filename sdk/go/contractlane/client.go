@@ -3,6 +3,7 @@ package contractlane
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,9 +21,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"contractlane/pkg/evidencehash"
 )
 
 const APIVersion = "v1"
+
+var ErrIncompatibleNode = errors.New("incompatible contractlane node")
 
 type RetryConfig struct {
 	MaxAttempts int
@@ -99,6 +104,100 @@ type ResolveOptions struct {
 	ClientReturnURL string
 }
 
+type ActorContext struct {
+	PrincipalID    string `json:"principal_id"`
+	ActorID        string `json:"actor_id"`
+	ActorType      string `json:"actor_type"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
+type ApprovalDecideOptions struct {
+	ActorContext      ActorContext
+	Decision          string
+	SignedPayload     map[string]any
+	SignedPayloadHash string
+	Signature         map[string]any
+	SignatureEnvelope *SignatureEnvelopeV1
+}
+
+type ApprovalDecisionResult struct {
+	ApprovalRequestID string         `json:"approval_request_id,omitempty"`
+	Status            string         `json:"status,omitempty"`
+	Raw               map[string]any `json:"-"`
+}
+
+type SignatureEnvelopeV1 struct {
+	Version     string `json:"version"`
+	Algorithm   string `json:"algorithm"`
+	PublicKey   string `json:"public_key"`
+	Signature   string `json:"signature"`
+	PayloadHash string `json:"payload_hash"`
+	IssuedAt    string `json:"issued_at"`
+	KeyID       string `json:"key_id,omitempty"`
+	Context     string `json:"context,omitempty"`
+}
+
+type Capabilities struct {
+	Protocol struct {
+		Name     string   `json:"name"`
+		Versions []string `json:"versions"`
+	} `json:"protocol"`
+	Evidence struct {
+		BundleVersions         []string `json:"bundle_versions"`
+		AlwaysPresentArtifacts []string `json:"always_present_artifacts"`
+	} `json:"evidence"`
+	Signatures struct {
+		Envelopes  []string `json:"envelopes"`
+		Algorithms []string `json:"algorithms"`
+	} `json:"signatures"`
+}
+
+type IncompatibleNodeError struct {
+	Missing []string
+}
+
+func (e *IncompatibleNodeError) Error() string {
+	if e == nil || len(e.Missing) == 0 {
+		return ErrIncompatibleNode.Error()
+	}
+	return fmt.Sprintf("%s: missing %s", ErrIncompatibleNode.Error(), strings.Join(e.Missing, ", "))
+}
+
+func (e *IncompatibleNodeError) Unwrap() error { return ErrIncompatibleNode }
+
+func SignSigV1Ed25519(payload any, priv ed25519.PrivateKey, issuedAt time.Time, context string) (env SignatureEnvelopeV1, err error) {
+	if len(priv) != ed25519.PrivateKeySize {
+		return SignatureEnvelopeV1{}, errors.New("ed25519 private key is required")
+	}
+	issuedAtUTC := issuedAt.UTC()
+	if issuedAtUTC.IsZero() {
+		return SignatureEnvelopeV1{}, errors.New("issued_at is required")
+	}
+	payloadHashHex, _, err := evidencehash.CanonicalSHA256(payload)
+	if err != nil {
+		return SignatureEnvelopeV1{}, err
+	}
+	hashBytes, err := hex.DecodeString(payloadHashHex)
+	if err != nil {
+		return SignatureEnvelopeV1{}, err
+	}
+	sig := ed25519.Sign(priv, hashBytes)
+	pub := priv.Public().(ed25519.PublicKey)
+
+	env = SignatureEnvelopeV1{
+		Version:     "sig-v1",
+		Algorithm:   "ed25519",
+		PublicKey:   base64.StdEncoding.EncodeToString(pub),
+		Signature:   base64.StdEncoding.EncodeToString(sig),
+		PayloadHash: payloadHashHex,
+		IssuedAt:    issuedAtUTC.Format(time.RFC3339Nano),
+	}
+	if strings.TrimSpace(context) != "" {
+		env.Context = strings.TrimSpace(context)
+	}
+	return env, nil
+}
+
 type AuthStrategy interface {
 	Apply(req *http.Request, body []byte) error
 }
@@ -150,10 +249,18 @@ func (a AgentHMACAuth) Apply(req *http.Request, body []byte) error {
 }
 
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
-	auth       AuthStrategy
-	retry      RetryConfig
+	baseURL                string
+	httpClient             *http.Client
+	auth                   AuthStrategy
+	retry                  RetryConfig
+	signingKey             ed25519.PrivateKey
+	signingKeyID           string
+	signingContext         string
+	disableCapabilityCheck bool
+	caps                   Capabilities
+	capsFetchedAt          time.Time
+	capsTTL                time.Duration
+	now                    func() time.Time
 }
 
 type Option func(*Client)
@@ -166,12 +273,30 @@ func WithRetry(cfg RetryConfig) Option {
 	return func(c *Client) { c.retry = cfg }
 }
 
+func WithSigningKeyEd25519(priv ed25519.PrivateKey) Option {
+	return func(c *Client) { c.signingKey = priv }
+}
+
+func WithKeyID(keyID string) Option {
+	return func(c *Client) { c.signingKeyID = strings.TrimSpace(keyID) }
+}
+
+func WithContext(context string) Option {
+	return func(c *Client) { c.signingContext = strings.TrimSpace(context) }
+}
+
+func WithDisableCapabilityCheck(disable bool) Option {
+	return func(c *Client) { c.disableCapabilityCheck = disable }
+}
+
 func NewClient(baseURL string, auth AuthStrategy, opts ...Option) *Client {
 	c := &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		auth:       auth,
 		retry:      RetryConfig{MaxAttempts: 3, BaseDelay: 200 * time.Millisecond, MaxDelay: 5 * time.Second},
+		capsTTL:    5 * time.Minute,
+		now:        func() time.Time { return time.Now().UTC() },
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -185,10 +310,67 @@ func NewClient(baseURL string, auth AuthStrategy, opts ...Option) *Client {
 	if c.retry.MaxDelay <= 0 {
 		c.retry.MaxDelay = 5 * time.Second
 	}
+	if strings.TrimSpace(c.signingContext) == "" {
+		c.signingContext = "contract-action"
+	}
 	return c
 }
 
 func NewIdempotencyKey() string { return newNonce() }
+
+func (c *Client) FetchCapabilities(ctx context.Context) (Capabilities, error) {
+	if c.hasFreshCapabilities() {
+		return c.caps, nil
+	}
+	raw, err := c.do(ctx, http.MethodGet, "/cel/.well-known/contractlane", nil, nil, true)
+	if err != nil {
+		return Capabilities{}, err
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return Capabilities{}, err
+	}
+	var caps Capabilities
+	if err := json.Unmarshal(b, &caps); err != nil {
+		return Capabilities{}, err
+	}
+	c.caps = caps
+	c.capsFetchedAt = c.now().UTC()
+	return caps, nil
+}
+
+func (c *Client) RequireProtocolV1(ctx context.Context) error {
+	caps, err := c.FetchCapabilities(ctx)
+	if err != nil {
+		return err
+	}
+	missing := make([]string, 0, 7)
+	if caps.Protocol.Name != "contractlane" {
+		missing = append(missing, "protocol.name=contractlane")
+	}
+	if !containsString(caps.Protocol.Versions, "v1") {
+		missing = append(missing, "protocol.versions contains v1")
+	}
+	if !containsString(caps.Evidence.BundleVersions, "evidence-v1") {
+		missing = append(missing, "evidence.bundle_versions contains evidence-v1")
+	}
+	if !containsString(caps.Signatures.Envelopes, "sig-v1") {
+		missing = append(missing, "signatures.envelopes contains sig-v1")
+	}
+	if !containsString(caps.Signatures.Algorithms, "ed25519") {
+		missing = append(missing, "signatures.algorithms contains ed25519")
+	}
+	if !containsString(caps.Evidence.AlwaysPresentArtifacts, "anchors") {
+		missing = append(missing, "evidence.always_present_artifacts contains anchors")
+	}
+	if !containsString(caps.Evidence.AlwaysPresentArtifacts, "webhook_receipts") {
+		missing = append(missing, "evidence.always_present_artifacts contains webhook_receipts")
+	}
+	if len(missing) > 0 {
+		return &IncompatibleNodeError{Missing: missing}
+	}
+	return nil
+}
 
 func (c *Client) GateStatus(ctx context.Context, gateKey, externalSubjectID string) (*GateResult, error) {
 	v := url.Values{}
@@ -315,6 +497,65 @@ func (c *Client) RenderTemplate(ctx context.Context, templateID, version string,
 	return c.do(ctx, http.MethodPost, path, body, nil, true)
 }
 
+func (c *Client) ApprovalDecide(ctx context.Context, approvalRequestID string, opts ApprovalDecideOptions) (*ApprovalDecisionResult, error) {
+	if strings.TrimSpace(approvalRequestID) == "" {
+		return nil, errors.New("approval_request_id is required")
+	}
+	if strings.TrimSpace(opts.Decision) == "" {
+		return nil, errors.New("decision is required")
+	}
+	if opts.SignedPayload == nil {
+		opts.SignedPayload = map[string]any{}
+	}
+	body := map[string]any{
+		"actor_context":  opts.ActorContext,
+		"decision":       opts.Decision,
+		"signed_payload": opts.SignedPayload,
+	}
+	if strings.TrimSpace(opts.SignedPayloadHash) != "" {
+		body["signed_payload_hash"] = opts.SignedPayloadHash
+	}
+
+	env := opts.SignatureEnvelope
+	if env == nil && len(c.signingKey) == ed25519.PrivateKeySize {
+		signed, err := SignSigV1Ed25519(opts.SignedPayload, c.signingKey, c.now().UTC(), c.signingContext)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(c.signingKeyID) != "" {
+			signed.KeyID = c.signingKeyID
+		}
+		env = &signed
+	}
+	if env != nil {
+		if !c.disableCapabilityCheck {
+			if err := c.RequireProtocolV1(ctx); err != nil {
+				return nil, err
+			}
+		}
+		body["signature_envelope"] = env
+	} else {
+		legacy := opts.Signature
+		if legacy == nil {
+			legacy = map[string]any{
+				"type":               "WEBAUTHN_ASSERTION",
+				"assertion_response": map[string]any{},
+			}
+		}
+		body["signature"] = legacy
+	}
+
+	path := "/cel/approvals/" + url.PathEscape(approvalRequestID) + ":decide"
+	raw, err := c.do(ctx, http.MethodPost, path, body, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	out := &ApprovalDecisionResult{Raw: raw}
+	out.ApprovalRequestID, _ = raw["approval_request_id"].(string)
+	out.Status, _ = raw["status"].(string)
+	return out, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body any, headers map[string]string, retryable bool) (map[string]any, error) {
 	var bodyBytes []byte
 	if body != nil {
@@ -424,6 +665,25 @@ func parseSDKError(status int, body []byte) error {
 		out.Message = http.StatusText(status)
 	}
 	return out
+}
+
+func (c *Client) hasFreshCapabilities() bool {
+	if c.capsFetchedAt.IsZero() || c.capsTTL <= 0 {
+		return false
+	}
+	if strings.TrimSpace(c.caps.Protocol.Name) == "" {
+		return false
+	}
+	return c.now().UTC().Before(c.capsFetchedAt.Add(c.capsTTL))
+}
+
+func containsString(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }
 
 func parseGateResult(raw map[string]any) *GateResult {

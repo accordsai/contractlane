@@ -9,7 +9,18 @@ import (
 )
 
 func TestVerifyBundleJSON_Good(t *testing.T) {
-	b := loadGoodBundle(t)
+	b := loadFixture(t, "bundle.good.json")
+	res, err := VerifyBundleJSON(b)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Status != StatusVerified {
+		t.Fatalf("expected %s, got %s details=%v", StatusVerified, res.Status, res.Details)
+	}
+}
+
+func TestVerifyBundleJSON_GoodWithWebhooks(t *testing.T) {
+	b := loadFixture(t, "bundle.good.with_webhooks.json")
 	res, err := VerifyBundleJSON(b)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -115,11 +126,16 @@ func mutateBundle(t *testing.T, bundle []byte, mut func(root map[string]any)) []
 
 func loadGoodBundle(t *testing.T) []byte {
 	t.Helper()
+	return loadFixture(t, "bundle.good.json")
+}
+
+func loadFixture(t *testing.T, name string) []byte {
+	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatalf("runtime caller unavailable")
 	}
-	p := filepath.Join(filepath.Dir(thisFile), "..", "..", "testdata", "evp", "bundle.good.json")
+	p := filepath.Join(filepath.Dir(thisFile), "..", "..", "testdata", "evp", name)
 	b, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatalf("read fixture %s: %v", p, err)

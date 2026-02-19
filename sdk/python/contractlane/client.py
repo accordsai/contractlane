@@ -5,13 +5,17 @@ import hashlib
 import hmac
 import json
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 import httpx
+from nacl.signing import SigningKey
+from nacl.signing import VerifyKey
 
 APIVersion = "v1"
 
@@ -30,6 +34,15 @@ class SDKError(Exception):
         self.error_code = error_code
         self.request_id = request_id
         self.details = details or {}
+
+
+class IncompatibleNodeError(Exception):
+    def __init__(self, missing_requirements: List[str]):
+        self.missing_requirements = missing_requirements
+        msg = "incompatible contractlane node"
+        if missing_requirements:
+            msg += ": missing " + ", ".join(missing_requirements)
+        super().__init__(msg)
 
 
 class AuthStrategy:
@@ -67,13 +80,74 @@ class AgentHmacAuth(AuthStrategy):
 
 
 class ContractLaneClient:
-    def __init__(self, base_url: str, auth: Optional[AuthStrategy] = None, timeout_seconds: float = 10.0, retry: Optional[RetryConfig] = None, headers: Optional[Dict[str, str]] = None):
+    def __init__(
+        self,
+        base_url: str,
+        auth: Optional[AuthStrategy] = None,
+        timeout_seconds: float = 10.0,
+        retry: Optional[RetryConfig] = None,
+        headers: Optional[Dict[str, str]] = None,
+        disable_capability_check: bool = False,
+    ):
         self.base_url = base_url.rstrip("/")
         self.auth = auth
         self.timeout_seconds = timeout_seconds
         self.retry = retry or RetryConfig()
         self.headers = headers or {}
+        self.disable_capability_check = disable_capability_check
         self.http = httpx.Client(timeout=self.timeout_seconds)
+        self._signing_seed_ed25519: Optional[bytes] = None
+        self._signing_key_id: Optional[str] = None
+        self._signing_context: str = "contract-action"
+        self._capabilities_cache: Optional[Dict[str, Any]] = None
+        self._capabilities_fetched_at: float = 0.0
+        self._capabilities_ttl_seconds: int = 300
+
+    def fetch_capabilities(self) -> Dict[str, Any]:
+        now = time.time()
+        if (
+            self._capabilities_cache is not None
+            and self._capabilities_fetched_at > 0
+            and (now - self._capabilities_fetched_at) < self._capabilities_ttl_seconds
+        ):
+            return self._capabilities_cache
+        caps = self._request("GET", "/cel/.well-known/contractlane", None, None, True)
+        self._capabilities_cache = caps
+        self._capabilities_fetched_at = now
+        return caps
+
+    def require_protocol_v1(self) -> None:
+        caps = self.fetch_capabilities()
+        missing: List[str] = []
+
+        protocol = caps.get("protocol") if isinstance(caps, dict) else {}
+        evidence = caps.get("evidence") if isinstance(caps, dict) else {}
+        signatures = caps.get("signatures") if isinstance(caps, dict) else {}
+
+        protocol_name = protocol.get("name") if isinstance(protocol, dict) else None
+        protocol_versions = protocol.get("versions") if isinstance(protocol, dict) else []
+        evidence_bundle_versions = evidence.get("bundle_versions") if isinstance(evidence, dict) else []
+        evidence_always_present = evidence.get("always_present_artifacts") if isinstance(evidence, dict) else []
+        signatures_envelopes = signatures.get("envelopes") if isinstance(signatures, dict) else []
+        signatures_algorithms = signatures.get("algorithms") if isinstance(signatures, dict) else []
+
+        if protocol_name != "contractlane":
+            missing.append("protocol.name=contractlane")
+        if not isinstance(protocol_versions, list) or "v1" not in protocol_versions:
+            missing.append("protocol.versions contains v1")
+        if not isinstance(evidence_bundle_versions, list) or "evidence-v1" not in evidence_bundle_versions:
+            missing.append("evidence.bundle_versions contains evidence-v1")
+        if not isinstance(signatures_envelopes, list) or "sig-v1" not in signatures_envelopes:
+            missing.append("signatures.envelopes contains sig-v1")
+        if not isinstance(signatures_algorithms, list) or "ed25519" not in signatures_algorithms:
+            missing.append("signatures.algorithms contains ed25519")
+        if not isinstance(evidence_always_present, list) or "anchors" not in evidence_always_present:
+            missing.append("evidence.always_present_artifacts contains anchors")
+        if not isinstance(evidence_always_present, list) or "webhook_receipts" not in evidence_always_present:
+            missing.append("evidence.always_present_artifacts contains webhook_receipts")
+
+        if missing:
+            raise IncompatibleNodeError(missing)
 
     def gate_status(self, gate_key: str, external_subject_id: str) -> Dict[str, Any]:
         path = f"/cel/gates/{quote(gate_key, safe='')}/status?external_subject_id={quote(external_subject_id, safe='')}"
@@ -167,6 +241,75 @@ class ContractLaneClient:
             body["locale"] = locale
         return self._request("POST", path, body, None, True)
 
+    def set_signing_key_ed25519(self, seed32: bytes, key_id: Optional[str] = None) -> None:
+        if not isinstance(seed32, (bytes, bytearray)) or len(seed32) != 32:
+            raise ValueError("ed25519 signing key seed must be 32 bytes")
+        self._signing_seed_ed25519 = bytes(seed32)
+        self._signing_key_id = key_id
+
+    def set_signing_context(self, context: str) -> None:
+        self._signing_context = context
+
+    def approval_decide(
+        self,
+        approval_request_id: str,
+        actor_context: Dict[str, Any],
+        decision: str,
+        signed_payload: Dict[str, Any],
+        signature: Optional[Dict[str, Any]] = None,
+        signed_payload_hash: Optional[str] = None,
+        signature_envelope: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if not approval_request_id:
+            raise ValueError("approval_request_id is required")
+        body: Dict[str, Any] = {
+            "actor_context": actor_context,
+            "decision": decision,
+            "signed_payload": signed_payload,
+        }
+
+        if signature_envelope is None and self._signing_seed_ed25519 is not None:
+            if not self.disable_capability_check:
+                self.require_protocol_v1()
+            signature_envelope = build_signature_envelope_v1(
+                payload=signed_payload,
+                signing_key=self._signing_seed_ed25519,
+                issued_at=datetime.now(timezone.utc),
+                context=self._signing_context or "contract-action",
+                key_id=self._signing_key_id,
+            )
+            body["signed_payload_hash"] = _canonical_sha256_hex(signed_payload)
+        elif signed_payload_hash:
+            body["signed_payload_hash"] = signed_payload_hash
+
+        if signature_envelope is not None:
+            body["signature_envelope"] = signature_envelope
+        else:
+            body["signature"] = signature or {"type": "WEBAUTHN_ASSERTION", "assertion_response": {}}
+
+        path = f"/cel/approvals/{quote(approval_request_id, safe='')}:decide"
+        return self._request("POST", path, body, None, True)
+
+    def approvalDecide(
+        self,
+        approval_request_id: str,
+        actor_context: Dict[str, Any],
+        decision: str,
+        signed_payload: Dict[str, Any],
+        signature: Optional[Dict[str, Any]] = None,
+        signed_payload_hash: Optional[str] = None,
+        signature_envelope: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return self.approval_decide(
+            approval_request_id=approval_request_id,
+            actor_context=actor_context,
+            decision=decision,
+            signed_payload=signed_payload,
+            signature=signature,
+            signed_payload_hash=signed_payload_hash,
+            signature_envelope=signature_envelope,
+        )
+
     def _request(self, method: str, path_with_query: str, body: Optional[Dict[str, Any]], extra_headers: Optional[Dict[str, str]], retryable: bool) -> Dict[str, Any]:
         body_bytes = stable_json(body) if body is not None else ""
         attempts = self.retry.max_attempts if retryable else 1
@@ -225,6 +368,449 @@ class ContractLaneClient:
 
 def stable_json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _canonical_json_bytes(obj: Any) -> bytes:
+    return stable_json(obj).encode("utf-8")
+
+
+def _canonical_sha256_hex(obj: Any) -> str:
+    return hashlib.sha256(_canonical_json_bytes(obj)).hexdigest()
+
+
+def _format_issued_at_utc(issued_at: datetime) -> str:
+    if issued_at.tzinfo is None or issued_at.utcoffset() is None:
+        raise ValueError("issued_at must be timezone-aware UTC")
+    if issued_at.utcoffset() != timezone.utc.utcoffset(issued_at):
+        raise ValueError("issued_at must be UTC")
+    return issued_at.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def build_signature_envelope_v1(
+    payload: Dict[str, Any],
+    signing_key: bytes,
+    issued_at: datetime,
+    context: str = "contract-action",
+    key_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not isinstance(signing_key, (bytes, bytearray)) or len(signing_key) != 32:
+        raise ValueError("signing_key must be 32 bytes ed25519 seed")
+
+    payload_hash = _canonical_sha256_hex(payload)
+    payload_hash_bytes = bytes.fromhex(payload_hash)
+
+    sk = SigningKey(bytes(signing_key))
+    vk_raw = bytes(sk.verify_key)
+    sig_raw = sk.sign(payload_hash_bytes).signature
+
+    env: Dict[str, Any] = {
+        "version": "sig-v1",
+        "algorithm": "ed25519",
+        "public_key": base64.b64encode(vk_raw).decode("ascii"),
+        "signature": base64.b64encode(sig_raw).decode("ascii"),
+        "payload_hash": payload_hash,
+        "issued_at": _format_issued_at_utc(issued_at),
+        "context": context,
+    }
+    if key_id:
+        env["key_id"] = key_id
+    return env
+
+
+def agent_id_from_public_key(pub: bytes) -> str:
+    if not isinstance(pub, (bytes, bytearray)) or len(pub) != 32:
+        raise ValueError("ed25519 public key must be 32 bytes")
+    b64 = base64.urlsafe_b64encode(bytes(pub)).decode("ascii").rstrip("=")
+    return "agent:pk:ed25519:" + b64
+
+
+def parse_agent_id(id: str) -> tuple[str, bytes]:
+    parts = id.split(":")
+    if len(parts) != 4:
+        raise ValueError("invalid agent id format")
+    if parts[0] != "agent" or parts[1] != "pk":
+        raise ValueError("invalid agent id prefix")
+    if parts[2] != "ed25519":
+        raise ValueError("unsupported algorithm")
+    encoded = parts[3]
+    if not encoded:
+        raise ValueError("missing public key")
+    if "=" in encoded:
+        raise ValueError("invalid base64url padding")
+    if re.fullmatch(r"[A-Za-z0-9_-]+", encoded) is None:
+        raise ValueError("invalid base64url public key")
+    pad_len = (4 - (len(encoded) % 4)) % 4
+    try:
+        pub = base64.urlsafe_b64decode(encoded + ("=" * pad_len))
+    except Exception as exc:
+        raise ValueError("invalid base64url public key") from exc
+    if len(pub) != 32:
+        raise ValueError("invalid ed25519 public key length")
+    return "ed25519", pub
+
+
+def is_valid_agent_id(id: str) -> bool:
+    try:
+        parse_agent_id(id)
+        return True
+    except Exception:
+        return False
+
+
+def _parse_rfc3339_utc(ts: str, field_name: str) -> datetime:
+    if not isinstance(ts, str) or not ts.endswith("Z"):
+        raise ValueError(f"{field_name} must be RFC3339 UTC")
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception as exc:
+        raise ValueError(f"{field_name} must be RFC3339 UTC") from exc
+    if dt.utcoffset() != timezone.utc.utcoffset(dt):
+        raise ValueError(f"{field_name} must be RFC3339 UTC")
+    return dt.astimezone(timezone.utc)
+
+
+def _validate_base64url_no_padding(value: str, field_name: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field_name} is required")
+    if "=" in value:
+        raise ValueError(f"{field_name} must be base64url without padding")
+    if re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+        raise ValueError(f"{field_name} must be base64url without padding")
+    pad_len = (4 - (len(value) % 4)) % 4
+    try:
+        base64.urlsafe_b64decode(value + ("=" * pad_len))
+    except Exception as exc:
+        raise ValueError(f"{field_name} must be base64url without padding") from exc
+
+
+def _validate_commerce_intent_v1(intent: Dict[str, Any]) -> Dict[str, Any]:
+    if intent.get("version") != "commerce-intent-v1":
+        raise ValueError("version must be commerce-intent-v1")
+    if not isinstance(intent.get("intent_id"), str) or not intent["intent_id"]:
+        raise ValueError("intent_id is required")
+    if not isinstance(intent.get("contract_id"), str) or not intent["contract_id"]:
+        raise ValueError("contract_id is required")
+    if not is_valid_agent_id(str(intent.get("buyer_agent", ""))):
+        raise ValueError("buyer_agent must be valid agent-id-v1")
+    if not is_valid_agent_id(str(intent.get("seller_agent", ""))):
+        raise ValueError("seller_agent must be valid agent-id-v1")
+    items = intent.get("items")
+    if not isinstance(items, list) or len(items) == 0:
+        raise ValueError("items are required")
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("item must be object")
+        if not isinstance(item.get("sku"), str) or not item["sku"]:
+            raise ValueError("item.sku is required")
+        qty = item.get("qty")
+        if not isinstance(qty, int) or qty < 1:
+            raise ValueError("item.qty must be integer >= 1")
+        unit_price = item.get("unit_price")
+        if not isinstance(unit_price, dict):
+            raise ValueError("item.unit_price is required")
+        if not isinstance(unit_price.get("currency"), str) or not isinstance(unit_price.get("amount"), str):
+            raise ValueError("item.unit_price currency/amount must be strings")
+    total = intent.get("total")
+    if not isinstance(total, dict):
+        raise ValueError("total is required")
+    if not isinstance(total.get("currency"), str) or not isinstance(total.get("amount"), str):
+        raise ValueError("total currency/amount must be strings")
+    _parse_rfc3339_utc(str(intent.get("expires_at", "")), "expires_at")
+    _validate_base64url_no_padding(str(intent.get("nonce", "")), "nonce")
+    metadata = intent.get("metadata")
+    if metadata is None:
+        intent["metadata"] = {}
+    elif not isinstance(metadata, dict):
+        raise ValueError("metadata must be an object")
+    return intent
+
+
+def _validate_commerce_accept_v1(acc: Dict[str, Any]) -> Dict[str, Any]:
+    if acc.get("version") != "commerce-accept-v1":
+        raise ValueError("version must be commerce-accept-v1")
+    if not isinstance(acc.get("contract_id"), str) or not acc["contract_id"]:
+        raise ValueError("contract_id is required")
+    intent_hash = acc.get("intent_hash")
+    if not isinstance(intent_hash, str) or re.fullmatch(r"[0-9a-f]{64}", intent_hash) is None:
+        raise ValueError("intent_hash must be lowercase hex sha256")
+    _parse_rfc3339_utc(str(acc.get("accepted_at", "")), "accepted_at")
+    _validate_base64url_no_padding(str(acc.get("nonce", "")), "nonce")
+    metadata = acc.get("metadata")
+    if metadata is None:
+        acc["metadata"] = {}
+    elif not isinstance(metadata, dict):
+        raise ValueError("metadata must be an object")
+    return acc
+
+
+def hash_commerce_intent_v1(intent: Dict[str, Any]) -> str:
+    normalized = _validate_commerce_intent_v1(dict(intent))
+    return _canonical_sha256_hex(normalized)
+
+
+def sign_commerce_intent_v1(intent: Dict[str, Any], signing_key: bytes, issued_at: str) -> Dict[str, Any]:
+    normalized = _validate_commerce_intent_v1(dict(intent))
+    issued_dt = _parse_rfc3339_utc(issued_at, "issued_at")
+    return build_signature_envelope_v1(
+        payload=normalized,
+        signing_key=signing_key,
+        issued_at=issued_dt,
+        context="commerce-intent",
+    )
+
+
+def verify_commerce_intent_v1(intent: Dict[str, Any], sig: Dict[str, Any]) -> None:
+    normalized = _validate_commerce_intent_v1(dict(intent))
+    if sig.get("version") != "sig-v1":
+        raise ValueError("signature_envelope version must be sig-v1")
+    if sig.get("algorithm") != "ed25519":
+        raise ValueError("signature_envelope algorithm must be ed25519")
+    if "context" in sig and sig.get("context") != "commerce-intent":
+        raise ValueError("signature context mismatch")
+    _parse_rfc3339_utc(str(sig.get("issued_at", "")), "issued_at")
+    expected_hash = hash_commerce_intent_v1(normalized)
+    if sig.get("payload_hash") != expected_hash:
+        raise ValueError("payload hash mismatch")
+    try:
+        pub = base64.b64decode(str(sig.get("public_key", "")))
+        signature = base64.b64decode(str(sig.get("signature", "")))
+    except Exception as exc:
+        raise ValueError("invalid signature encoding") from exc
+    if len(pub) != 32 or len(signature) != 64:
+        raise ValueError("invalid signature encoding")
+    VerifyKey(pub).verify(bytes.fromhex(expected_hash), signature)
+
+
+def hash_commerce_accept_v1(acc: Dict[str, Any]) -> str:
+    normalized = _validate_commerce_accept_v1(dict(acc))
+    return _canonical_sha256_hex(normalized)
+
+
+def sign_commerce_accept_v1(acc: Dict[str, Any], signing_key: bytes, issued_at: str) -> Dict[str, Any]:
+    normalized = _validate_commerce_accept_v1(dict(acc))
+    issued_dt = _parse_rfc3339_utc(issued_at, "issued_at")
+    return build_signature_envelope_v1(
+        payload=normalized,
+        signing_key=signing_key,
+        issued_at=issued_dt,
+        context="commerce-accept",
+    )
+
+
+def verify_commerce_accept_v1(acc: Dict[str, Any], sig: Dict[str, Any]) -> None:
+    normalized = _validate_commerce_accept_v1(dict(acc))
+    if sig.get("version") != "sig-v1":
+        raise ValueError("signature_envelope version must be sig-v1")
+    if sig.get("algorithm") != "ed25519":
+        raise ValueError("signature_envelope algorithm must be ed25519")
+    if "context" in sig and sig.get("context") != "commerce-accept":
+        raise ValueError("signature context mismatch")
+    _parse_rfc3339_utc(str(sig.get("issued_at", "")), "issued_at")
+    expected_hash = hash_commerce_accept_v1(normalized)
+    if sig.get("payload_hash") != expected_hash:
+        raise ValueError("payload hash mismatch")
+    try:
+        pub = base64.b64decode(str(sig.get("public_key", "")))
+        signature = base64.b64decode(str(sig.get("signature", "")))
+    except Exception as exc:
+        raise ValueError("invalid signature encoding") from exc
+    if len(pub) != 32 or len(signature) != 64:
+        raise ValueError("invalid signature encoding")
+    VerifyKey(pub).verify(bytes.fromhex(expected_hash), signature)
+
+
+_DELEGATION_ALLOWED_TOP_LEVEL_KEYS = {
+    "version",
+    "delegation_id",
+    "issuer_agent",
+    "subject_agent",
+    "scopes",
+    "constraints",
+    "nonce",
+    "issued_at",
+}
+
+_DELEGATION_ALLOWED_CONSTRAINT_KEYS = {
+    "contract_id",
+    "counterparty_agent",
+    "max_amount",
+    "valid_from",
+    "valid_until",
+    "max_uses",
+    "purpose",
+}
+
+_DELEGATION_KNOWN_SCOPES = {
+    "commerce:intent:sign",
+    "commerce:accept:sign",
+    "cel:action:execute",
+    "cel:approval:sign",
+    "settlement:attest",
+}
+
+_AMOUNT_EXPONENTS = {
+    "USD": 2,
+    "EUR": 2,
+    "GBP": 2,
+    "JPY": 0,
+    "KRW": 0,
+    "INR": 2,
+    "CHF": 2,
+    "CAD": 2,
+    "AUD": 2,
+}
+
+
+def _parse_normalized_amount_to_minor(amount: Dict[str, Any]) -> int:
+    if not isinstance(amount, dict):
+        raise ValueError("amount must be object")
+    currency = str(amount.get("currency", "")).strip().upper()
+    value = str(amount.get("amount", "")).strip()
+    if re.fullmatch(r"[A-Z]{3}", currency) is None:
+        raise ValueError("amount currency must be ISO4217 uppercase 3 letters")
+    if currency not in _AMOUNT_EXPONENTS:
+        raise ValueError("unknown currency")
+    if value == "" or value.startswith("+") or ("e" in value.lower()):
+        raise ValueError("amount must be normalized decimal")
+    if value.count(".") > 1:
+        raise ValueError("amount must be normalized decimal")
+    if value.startswith("0") and value not in {"0"} and not value.startswith("0."):
+        raise ValueError("amount must be normalized decimal")
+    parts = value.split(".")
+    if not parts[0].isdigit():
+        raise ValueError("amount must be normalized decimal")
+    frac = parts[1] if len(parts) == 2 else ""
+    if frac:
+        if not frac.isdigit() or frac.endswith("0"):
+            raise ValueError("amount must be normalized decimal")
+    exp = _AMOUNT_EXPONENTS[currency]
+    if exp == 0:
+        if frac:
+            raise ValueError("amount must be normalized decimal")
+        return int(parts[0])
+    if len(frac) > exp:
+        raise ValueError("amount precision exceeds currency minor units")
+    frac_padded = frac + ("0" * (exp - len(frac)))
+    return int(parts[0]) * (10**exp) + (int(frac_padded) if frac_padded else 0)
+
+
+def _validate_delegation_v1(payload: Dict[str, Any]) -> Dict[str, Any]:
+    unknown = set(payload.keys()) - _DELEGATION_ALLOWED_TOP_LEVEL_KEYS
+    if unknown:
+        raise ValueError(f"unknown delegation keys: {sorted(unknown)}")
+    if payload.get("version") != "delegation-v1":
+        raise ValueError("version must be delegation-v1")
+    if not isinstance(payload.get("delegation_id"), str) or not payload["delegation_id"].strip():
+        raise ValueError("delegation_id is required")
+    if not is_valid_agent_id(str(payload.get("issuer_agent", ""))):
+        raise ValueError("issuer_agent must be valid agent-id-v1")
+    if not is_valid_agent_id(str(payload.get("subject_agent", ""))):
+        raise ValueError("subject_agent must be valid agent-id-v1")
+    scopes = payload.get("scopes")
+    if not isinstance(scopes, list) or len(scopes) == 0:
+        raise ValueError("scopes must be non-empty")
+    normalized_scopes = sorted(set(str(s).strip() for s in scopes))
+    if not all(s in _DELEGATION_KNOWN_SCOPES for s in normalized_scopes):
+        raise ValueError("scopes contain unknown values")
+
+    constraints = payload.get("constraints")
+    if not isinstance(constraints, dict):
+        raise ValueError("constraints is required")
+    unknown_constraints = set(constraints.keys()) - _DELEGATION_ALLOWED_CONSTRAINT_KEYS
+    if unknown_constraints:
+        raise ValueError(f"unknown delegation constraints keys: {sorted(unknown_constraints)}")
+    if not isinstance(constraints.get("contract_id"), str) or not constraints["contract_id"]:
+        raise ValueError("constraints.contract_id is required")
+    cp = constraints.get("counterparty_agent")
+    if not isinstance(cp, str) or not cp:
+        raise ValueError("constraints.counterparty_agent is required")
+    if cp != "*" and not is_valid_agent_id(cp):
+        raise ValueError("constraints.counterparty_agent must be * or valid agent-id-v1")
+    valid_from = _parse_rfc3339_utc(str(constraints.get("valid_from", "")), "constraints.valid_from")
+    valid_until = _parse_rfc3339_utc(str(constraints.get("valid_until", "")), "constraints.valid_until")
+    if valid_from > valid_until:
+        raise ValueError("constraints.valid_from must be <= constraints.valid_until")
+    if "max_uses" in constraints and constraints.get("max_uses") is not None:
+        max_uses = constraints.get("max_uses")
+        if not isinstance(max_uses, int) or max_uses < 1:
+            raise ValueError("constraints.max_uses must be integer >=1")
+    if constraints.get("max_amount") is not None:
+        _parse_normalized_amount_to_minor(constraints["max_amount"])
+    _validate_base64url_no_padding(str(payload.get("nonce", "")), "nonce")
+    _parse_rfc3339_utc(str(payload.get("issued_at", "")), "issued_at")
+
+    out = dict(payload)
+    out["scopes"] = normalized_scopes
+    return out
+
+
+def hash_delegation_v1(payload: Dict[str, Any]) -> str:
+    normalized = _validate_delegation_v1(dict(payload))
+    return _canonical_sha256_hex(normalized)
+
+
+def sign_delegation_v1(payload: Dict[str, Any], signing_key: bytes, issued_at: str) -> Dict[str, Any]:
+    normalized = _validate_delegation_v1(dict(payload))
+    issued_dt = _parse_rfc3339_utc(issued_at, "issued_at")
+    return build_signature_envelope_v1(
+        payload=normalized,
+        signing_key=signing_key,
+        issued_at=issued_dt,
+        context="delegation",
+    )
+
+
+def verify_delegation_v1(payload: Dict[str, Any], sig: Dict[str, Any]) -> None:
+    normalized = _validate_delegation_v1(dict(payload))
+    if sig.get("version") != "sig-v1":
+        raise ValueError("signature_envelope version must be sig-v1")
+    if sig.get("algorithm") != "ed25519":
+        raise ValueError("signature_envelope algorithm must be ed25519")
+    if "context" in sig and sig.get("context") != "delegation":
+        raise ValueError("signature context mismatch")
+    _parse_rfc3339_utc(str(sig.get("issued_at", "")), "issued_at")
+    expected_hash = hash_delegation_v1(normalized)
+    if sig.get("payload_hash") != expected_hash:
+        raise ValueError("payload hash mismatch")
+    try:
+        pub = base64.b64decode(str(sig.get("public_key", "")))
+        signature = base64.b64decode(str(sig.get("signature", "")))
+    except Exception as exc:
+        raise ValueError("invalid signature encoding") from exc
+    if len(pub) != 32 or len(signature) != 64:
+        raise ValueError("invalid signature encoding")
+    VerifyKey(pub).verify(bytes.fromhex(expected_hash), signature)
+    issuer = agent_id_from_public_key(pub)
+    if issuer != normalized["issuer_agent"]:
+        raise ValueError("signature public key does not match issuer_agent")
+
+
+def evaluate_delegation_constraints(constraints: Dict[str, Any], eval_ctx: Dict[str, Any]) -> None:
+    c = _validate_delegation_v1({
+        "version": "delegation-v1",
+        "delegation_id": "del_eval",
+        "issuer_agent": eval_ctx.get("issuer_agent", eval_ctx.get("subject_agent", "agent:pk:ed25519:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8")),
+        "subject_agent": eval_ctx.get("subject_agent", "agent:pk:ed25519:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"),
+        "scopes": [eval_ctx.get("scope", "commerce:intent:sign")],
+        "constraints": constraints,
+        "nonce": "bm9uY2VfdjE",
+        "issued_at": eval_ctx.get("issued_at_utc", "2026-02-18T00:00:00Z"),
+    })["constraints"]
+    if c["contract_id"] != "*" and c["contract_id"] != eval_ctx.get("contract_id"):
+        raise ValueError("delegation_constraints_failed")
+    cp = eval_ctx.get("counterparty_agent")
+    if c["counterparty_agent"] != "*" and c["counterparty_agent"] != cp:
+        raise ValueError("delegation_constraints_failed")
+    at = _parse_rfc3339_utc(str(eval_ctx.get("issued_at_utc", "")), "issued_at_utc")
+    vf = _parse_rfc3339_utc(str(c["valid_from"]), "constraints.valid_from")
+    vu = _parse_rfc3339_utc(str(c["valid_until"]), "constraints.valid_until")
+    if at < vf or at > vu:
+        raise ValueError("delegation_expired")
+    if c.get("max_amount") is not None and eval_ctx.get("payment_amount") is not None:
+        mx = _parse_normalized_amount_to_minor(c["max_amount"])
+        pay = _parse_normalized_amount_to_minor(eval_ctx["payment_amount"])
+        if str(c["max_amount"].get("currency", "")).upper() != str(eval_ctx["payment_amount"].get("currency", "")).upper() or pay > mx:
+            raise ValueError("delegation_amount_exceeded")
 
 
 def new_idempotency_key() -> str:

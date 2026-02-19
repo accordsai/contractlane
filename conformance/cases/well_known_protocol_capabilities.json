@@ -1,0 +1,18 @@
+{
+  "name": "well_known_protocol_capabilities",
+  "request": {
+    "method": "GET",
+    "path": "/cel/.well-known/contractlane"
+  },
+  "expect": {
+    "status_code": 200,
+    "protocol_versions_contains": "v1",
+    "evidence_bundle_versions_contains": "evidence-v1",
+    "signatures_envelopes_contains": "sig-v1",
+    "signatures_algorithms_contains": "ed25519",
+    "always_present_artifacts_contains": [
+      "anchors",
+      "webhook_receipts"
+    ]
+  }
+}
