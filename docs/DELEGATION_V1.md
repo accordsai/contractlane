@@ -1,48 +1,35 @@
-# Delegation v1 (Offline-First)
+# DELEGATION_V1
 
-Delegation payload (closed schema):
+Delegation payload version:
+
+- `version = "delegation-v1"`
+
+Signed artifact entry:
 
 ```json
 {
-  "version": "delegation-v1",
-  "delegation_id": "del_<ulid>",
-  "issuer_agent": "agent:pk:ed25519:...",
-  "subject_agent": "agent:pk:ed25519:...",
-  "scopes": ["commerce:intent:sign", "commerce:accept:sign"],
-  "constraints": {
-    "contract_id": "*" ,
-    "counterparty_agent": "*",
-    "max_amount": { "currency": "USD", "amount": "250" },
-    "valid_from": "RFC3339 UTC",
-    "valid_until": "RFC3339 UTC",
-    "max_uses": 1,
-    "purpose": "*"
-  },
-  "nonce": "<base64url-no-padding>",
-  "issued_at": "RFC3339 UTC"
+  "delegation": { "...": "delegation-v1 payload" },
+  "issuer_signature": { "...": "sig-v1 with context=delegation" }
 }
 ```
 
-Implemented scopes:
-- `commerce:intent:sign`
-- `commerce:accept:sign`
+## Required Model
 
-Reserved scopes:
-- `cel:action:execute`
-- `cel:approval:sign`
-- `settlement:attest`
+- `delegation_id`
+- `issuer_agent`
+- `subject_agent`
+- `scopes` (non-empty, known values)
+- `constraints` (closed schema)
+- `nonce` (base64url, no padding)
+- `issued_at` (UTC `Z`)
 
-Evidence artifact:
-- `artifacts.delegations`: array of
-  - `{ "delegation": <delegation-v1>, "issuer_signature": <sig-v1> }`
-  - sorted by `delegation.delegation_id` ascending.
+## Deterministic Failure Reasons
 
-Reserved revocation surface (not enforced in Slice 18):
-- `artifacts.delegation_revocations` with entries:
-  - `version: "delegation-revocation-v1"`
-  - `revocation_id`
-  - `delegation_id`
-  - `issuer_agent`
-  - `revoked_at` (RFC3339 UTC)
-  - optional `reason`
-- future signature binding context: `delegation-revocation`.
+- `missing_delegation`
+- `delegation_untrusted_issuer`
+- `delegation_scope_missing`
+- `delegation_constraints_failed`
+- `delegation_signature_invalid`
+- `delegation_expired`
+- `delegation_amount_exceeded`
+- `delegation_revoked`
