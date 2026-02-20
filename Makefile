@@ -7,7 +7,7 @@ PY_SDK_PYTHON := $(PY_SDK_VENV)/bin/python
 
 up:
 	docker compose -f docker-compose.dev.yml up --build -d
-        sleep 2
+	sleep 2
 	$(MAKE) migrate
 	$(MAKE) wait-ready
 
@@ -36,9 +36,10 @@ wait-ready:
 
 wait-ready-prod:
 	@for i in {1..180}; do \
-		if curl -sf http://localhost:8081/health >/dev/null && \
-		   curl -sf http://localhost:8082/health >/dev/null && \
-		   curl -sf http://localhost:8083/health >/dev/null; then \
+		if curl -sf http://localhost:8082/health >/dev/null && \
+		   docker compose -f docker-compose.prod.yml ps --services --filter status=running | grep -qx 'ial' && \
+		   docker compose -f docker-compose.prod.yml ps --services --filter status=running | grep -qx 'execution' && \
+		   docker compose -f docker-compose.prod.yml ps --services --filter status=running | grep -qx 'cel'; then \
 			echo "services ready"; \
 			exit 0; \
 		fi; \
