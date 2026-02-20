@@ -106,6 +106,8 @@ Routing is configured via `webhook_endpoints` records scoped by `(provider, endp
 
 `GET /cel/.well-known/contractlane` advertises available protocol surfaces, including hosted commerce endpoints (`/commerce/intents`, `/commerce/accepts`) and proof export (`/cel/contracts/{id}/proof`).
 
+Onboarding/public-signup routes are control-plane endpoints and may be operator-specific; they are not currently required protocol discovery fields in the CEL well-known response.
+
 Operational toggles and hosted-mode error handling are documented in `docs/hosted_mode.md`.
 
 ## Stripe Webhook Setup (Execution)

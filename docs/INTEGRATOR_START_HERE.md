@@ -35,6 +35,7 @@ Hosted deployment (most integrators):
 - Call CEL endpoints directly.
 - Do not assume `/ial/*` endpoints are publicly exposed.
 - Credentials may be issued via onboarding control plane (`docs/ONBOARDING_SERVICE.md`).
+- Capability discovery at `/cel/.well-known/contractlane` does not currently enumerate onboarding/public-signup endpoints; treat those as provider-specific control-plane surfaces.
 
 Self-hosted deployment:
 

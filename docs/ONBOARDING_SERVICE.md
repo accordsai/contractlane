@@ -19,11 +19,11 @@ It does **not** change protocol semantics.
 Prerequisites:
 
 - Existing services already running (`postgres`, `ial`, `cel`, `execution`)
-- Shared Docker network name (default: `accords_default`)
+- Shared Docker network name (default: `contractlane_default`)
 
 Environment:
 
-- `CONTRACTLANE_SHARED_NETWORK=accords_default`
+- `CONTRACTLANE_SHARED_NETWORK=contractlane_default`
 - `ONBOARDING_DATABASE_URL=postgres://contractlane:...@postgres:5432/contractlane?sslmode=disable`
 - `ONBOARDING_IAL_BASE_URL=http://ial:8081/ial`
 - `ONBOARDING_BOOTSTRAP_TOKEN=<strong-secret>`
@@ -69,6 +69,7 @@ Public signup phase A:
 Auth:
 
 - Bearer token (`Authorization: Bearer <ONBOARDING_BOOTSTRAP_TOKEN>`)
+- If `ONBOARDING_BOOTSTRAP_TOKEN` is unset/empty, control-plane onboarding endpoints become effectively open; do not run that mode on internet-exposed deployments.
 - Public signup endpoints are intentionally unauthenticated in Phase A and must be protected by network controls/rate limiting upstream.
 - If `ONBOARDING_PUBLIC_SIGNUP_CHALLENGE_TOKEN` is set, clients must send `X-Signup-Challenge: <token>`.
 
@@ -119,6 +120,34 @@ For agent integrators:
 2. Store token in vault/secret manager.
 3. Use Contract Lane SDKs against CEL with those credentials.
 4. Do not call IAL directly from public agents in hosted mode.
+
+## Hosted Operator Profile (Recommended)
+
+For an internet-facing hosted deployment, use this route exposure model:
+
+- Public:
+  - `GET /health` (as needed for probes)
+  - `/cel/*` (protocol/runtime API)
+  - `/onboarding/*` (control-plane admin API, protected)
+  - `/public/*` (optional self-signup flow, hardened)
+- Private (no public ingress):
+  - `/ial/*`
+  - `/exec/*` (unless explicitly required)
+  - `postgres` service port
+
+Recommended reverse-proxy policy:
+
+- Require TLS for all public routes.
+- Require strong auth for `/onboarding/*` (bootstrap token and/or upstream authn).
+- Apply stricter rate limits and abuse controls on `/public/*`.
+- Keep IAL on private network only; onboarding talks to IAL internally.
+
+Operational defaults:
+
+- `ONBOARDING_BOOTSTRAP_TOKEN` set and rotated.
+- `ONBOARDING_PUBLIC_SIGNUP_DEV_MODE=false` in production.
+- `ONBOARDING_PUBLIC_SIGNUP_CHALLENGE_TOKEN` set when `/public/*` is internet-exposed.
+- `CONTRACTLANE_SHARED_NETWORK=contractlane_default` unless explicitly customized.
 
 Public self-signup (phase C):
 

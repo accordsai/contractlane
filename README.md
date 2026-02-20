@@ -23,6 +23,7 @@ NOTE: to make this production safe you will need some kind of SSL termination, o
 
 ## Specs
 
+- `OPENCLAW.md`
 - `docs/INTEGRATOR_START_HERE.md`
 - `docs/PROTOCOL.md`
 - `docs/SIG_V1.md`
@@ -54,5 +55,5 @@ NOTE: to make this production safe you will need some kind of SSL termination, o
 - Purpose: org/project bootstrap, IAL principal provisioning, agent credential issuance
 - Runs as an overlay stack alongside existing Contract Lane services using `docker-compose.onboarding.yml`
 - Bring up with `make onboarding-up`, validate with `make onboarding-smoke`, tear down with `make onboarding-down`
-- Overlay services attach to `${CONTRACTLANE_SHARED_NETWORK}` (default `accords_default`) so onboarding can reach existing `postgres` and `ial` hosts
+- Overlay services attach to `${CONTRACTLANE_SHARED_NETWORK}` (default `contractlane_default`) so onboarding can reach existing `postgres` and `ial` hosts
 - Public ingress recommendation: reverse-proxy `/onboarding/*` and `/public/*` to onboarding service; keep IAL private

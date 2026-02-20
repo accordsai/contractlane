@@ -2,6 +2,8 @@
 
 Conformance defines compatibility for protocol v1.0.0.
 
+Control-plane onboarding/public-signup endpoints are operational overlays and are not part of protocol conformance compatibility.
+
 ## Run
 
 ```bash
