@@ -3,7 +3,7 @@ SHELL := /bin/bash
 PY_SDK_VENV := sdk/python/.venv
 PY_SDK_PYTHON := $(PY_SDK_VENV)/bin/python
 
-.PHONY: up up-dev down migrate test smoke logs fmt sdk-test sdk-conformance wait-ready sdk-python-venv test-sdk-python sdk-sanity
+.PHONY: up up-dev up-prod down down-prod migrate migrate-prod test smoke logs logs-prod fmt sdk-test sdk-conformance wait-ready wait-ready-prod sdk-python-venv test-sdk-python sdk-sanity
 
 up:
 	docker compose -f docker-compose.dev.yml up --build -d
@@ -12,6 +12,13 @@ up:
 	$(MAKE) wait-ready
 
 up-dev: up
+
+up-prod:
+	bash scripts/prod_preflight.sh
+	docker compose -f docker-compose.prod.yml up --build -d postgres
+	$(MAKE) migrate-prod
+	docker compose -f docker-compose.prod.yml up --build -d ial execution cel
+	$(MAKE) wait-ready-prod
 
 wait-ready:
 	@for i in {1..180}; do \
@@ -27,11 +34,30 @@ wait-ready:
 	echo "services not ready"; \
 	exit 1
 
+wait-ready-prod:
+	@for i in {1..180}; do \
+		if curl -sf http://localhost:8081/health >/dev/null && \
+		   curl -sf http://localhost:8082/health >/dev/null && \
+		   curl -sf http://localhost:8083/health >/dev/null; then \
+			echo "services ready"; \
+			exit 0; \
+		fi; \
+		sleep 2; \
+	done; \
+	echo "services not ready"; \
+	exit 1
+
 down:
 	docker compose -f docker-compose.dev.yml down -v
 
+down-prod:
+	docker compose -f docker-compose.prod.yml down
+
 migrate:
 	docker compose -f docker-compose.dev.yml run --rm migrate
+
+migrate-prod:
+	docker compose -f docker-compose.prod.yml run --rm migrate
 
 test:
 	go test ./... -count=1
@@ -81,6 +107,9 @@ sdk-sanity:
 
 logs:
 	docker compose -f docker-compose.dev.yml logs -f --tail=200
+
+logs-prod:
+	docker compose -f docker-compose.prod.yml logs -f --tail=200
 
 fmt:
 	gofmt -w .

@@ -1,0 +1,94 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - contractlane_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    image: migrate/migrate:v4.17.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    working_dir: /work
+    volumes:
+      - ./:/work
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        if [ "${POSTGRES_PASSWORD}" = "CHANGE_ME_STRONG_PASSWORD" ]; then
+          echo "WARNING: POSTGRES_PASSWORD is still the default value. Change it in .env before public exposure."
+        fi
+        migrate -path /work/migrations -database "${DATABASE_URL}" up
+
+  ial:
+    build:
+      context: .
+      dockerfile: services/ial/Dockerfile.prod
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SERVICE_PORT: ${IAL_SERVICE_PORT}
+      IAL_DEV_BOOTSTRAP: ${IAL_DEV_BOOTSTRAP}
+      IAL_ALLOW_DEV_SIGNATURE_BYPASS: ${IAL_ALLOW_DEV_SIGNATURE_BYPASS}
+      IAL_DELEGATION_HMAC_SECRET: ${IAL_DELEGATION_HMAC_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  cel:
+    build:
+      context: .
+      dockerfile: services/cel/Dockerfile.prod
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SERVICE_PORT: ${CEL_SERVICE_PORT}
+      IAL_BASE_URL: ${IAL_BASE_URL}
+      EXEC_BASE_URL: ${EXEC_BASE_URL}
+      CEL_DEV_MODE: ${CEL_DEV_MODE}
+      ENABLE_HOSTED_COMMERCE: ${ENABLE_HOSTED_COMMERCE}
+      ENABLE_PROOF_EXPORT: ${ENABLE_PROOF_EXPORT}
+      ENABLE_PROOF_BUNDLE_EXPORT: ${ENABLE_PROOF_BUNDLE_EXPORT}
+      ENABLE_SERVER_DERIVED_SETTLEMENT_ATTESTATIONS: ${ENABLE_SERVER_DERIVED_SETTLEMENT_ATTESTATIONS}
+      HOSTED_MAX_BODY_BYTES: ${HOSTED_MAX_BODY_BYTES}
+      HOSTED_RATE_LIMIT_PER_MINUTE: ${HOSTED_RATE_LIMIT_PER_MINUTE}
+      PROOF_RATE_LIMIT_PER_MINUTE: ${PROOF_RATE_LIMIT_PER_MINUTE}
+      COMMERCE_TRUST_AGENTS: ${COMMERCE_TRUST_AGENTS}
+      CEL_RULES_V1_JSON: ${CEL_RULES_V1_JSON}
+      RFC3161_TSA_URL: ${RFC3161_TSA_URL}
+      RFC3161_TSA_ALLOWLIST: ${RFC3161_TSA_ALLOWLIST}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ial:
+        condition: service_started
+      execution:
+        condition: service_started
+    ports:
+      - "8082:8082"
+    restart: unless-stopped
+
+  execution:
+    build:
+      context: .
+      dockerfile: services/execution/Dockerfile.prod
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      SERVICE_PORT: ${EXEC_SERVICE_PORT}
+      EXEC_WEBHOOK_SECRET: ${EXEC_WEBHOOK_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  contractlane_pgdata:

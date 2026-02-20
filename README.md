@@ -11,6 +11,16 @@ make smoke
 BASE_URL=http://localhost:8082 ./conformance/runner/run_local_conformance.sh
 ```
 
+## Production Demo (Docker)
+
+```bash
+# 1) Edit .env (at minimum: POSTGRES_PASSWORD, IAL_DELEGATION_HMAC_SECRET, EXEC_WEBHOOK_SECRET)
+# 2) Start production stack
+make up-prod
+```
+
+`make up-prod` will print warnings if default secrets are still present in `.env`.
+
 ## Specs
 
 - `docs/PROTOCOL.md`
