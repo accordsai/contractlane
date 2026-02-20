@@ -152,6 +152,13 @@ class ContractLaneClient {
             raw: c,
         };
     }
+    async createContract(input) {
+        const raw = await this.request('POST', '/cel/contracts', input, undefined, true);
+        return {
+            contract: raw.contract,
+            raw,
+        };
+    }
     async evidence(gateKey, externalSubjectId) {
         const path = `/cel/gates/${encodeURIComponent(gateKey)}/evidence?external_subject_id=${encodeURIComponent(externalSubjectId)}`;
         const raw = await this.request('GET', path, undefined, undefined, true);

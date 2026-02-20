@@ -32,6 +32,26 @@ export type Contract = {
     template_version?: string;
     raw: Record<string, unknown>;
 };
+export type ActorContext = {
+    principal_id: string;
+    actor_id: string;
+    actor_type: string;
+    idempotency_key?: string;
+};
+export type CreateContractCounterparty = {
+    name: string;
+    email: string;
+};
+export type CreateContractInput = {
+    actor_context: ActorContext;
+    template_id: string;
+    counterparty: CreateContractCounterparty;
+    initial_variables?: Record<string, string>;
+};
+export type CreateContractResponse = {
+    contract?: Record<string, unknown>;
+    raw: Record<string, unknown>;
+};
 export type Evidence = Record<string, unknown>;
 export type ContractEvidenceBundle = Record<string, unknown>;
 export type CommerceAmountV1 = {
@@ -241,6 +261,7 @@ export declare class ContractLaneClient {
     gateResolve(gateKey: string, externalSubjectId: string, actorType?: 'HUMAN' | 'AGENT', idempotencyKey?: string): Promise<GateResult>;
     contractAction(contractId: string, action: string, body: Record<string, unknown> | undefined, idempotencyKey?: string): Promise<ActionResult>;
     getContract(contractId: string): Promise<Contract>;
+    createContract(input: CreateContractInput): Promise<CreateContractResponse>;
     evidence(gateKey: string, externalSubjectId: string): Promise<Evidence>;
     getContractEvidence(contractId: string, opts?: {
         format?: 'json' | 'zip';
