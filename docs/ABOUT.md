@@ -6,7 +6,7 @@ Contract Lane is a trust layer for autonomous software agents.
 
 As AI systems begin to buy things, sign agreements, trigger payments, and act on behalf of people or companies, we need a way to answer one critical question:
 
-> “How do we prove what actually happened — without trusting a single server?”
+"How do we prove what actually happened — without trusting a single server?”
 
 
 
