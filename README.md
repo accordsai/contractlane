@@ -18,7 +18,7 @@ BASE_URL=http://localhost:8082 ./conformance/runner/run_local_conformance.sh
 # 2) Start production stack
 make up-prod
 ```
-
+NOTE: to make this production safe you will need some kind of SSL termination, or an nginx reverse proxy in front of the service.
 `make up-prod` will print warnings if default secrets are still present in `.env`.
 
 ## Specs
