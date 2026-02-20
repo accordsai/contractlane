@@ -1,118 +1,81 @@
-# Agent Integration Guide (Contract Lane Protocol v1)
-
-## Scope
+# Agent Integration Guide (Protocol v1)
 
 This guide is practical integration guidance for agents consuming Contract Lane Protocol v1.
 
-## Minimum Agent Implementation
+## Minimum Implementation
 
-An agent must implement:
+An integrating agent should implement:
 
-- Generate and store a signing keypair (recommended: `ed25519`).
-- Build `sig-v1` signature envelopes with required `issued_at`.
-- Call Contract Lane API endpoints for contract and approval workflow.
-- Fetch and verify evidence bundles using EVP.
+- `sig-v1` signing (at least `ed25519`) with required `issued_at` (UTC RFC3339/RFC3339Nano with `Z`).
+- Canonical payload hashing exactly as required by protocol objects.
+- Contract Lane API calls for contract actions and approvals.
+- Offline verification of returned evidence/proof artifacts.
 
-## What Agents Do Not Need To Implement
+## What Is Optional
 
-- You do not need to run CEL/IAL/Execution if using a hosted Contract Lane node.
-- You do not need to implement anchoring to be protocol-compatible.
-- You do not need to implement webhook ingestion to be protocol-compatible.
+- Running CEL/IAL/Execution yourself (optional if you use a hosted node).
+- Webhook ingestion implementation.
+- Anchoring implementation.
 
-## Endpoints Agents Use
+## Agent Identity (v1)
 
-Core endpoints used by agents:
+`agent-id-v1` format is:
+
+`agent:pk:ed25519:<base64url_no_padding_32_byte_pubkey>`
+
+See `docs/AGENT_ID_V1.md`.
+
+## Core Endpoints
 
 - `POST /cel/contracts`
 - `POST /cel/contracts/{contract_id}/variables:bulkSet`
 - `POST /cel/contracts/{contract_id}/actions/{action}`
-- `GET /cel/contracts/{contract_id}`
 - `POST /cel/approvals/{approval_request_id}:decide`
-- `GET /cel/contracts/{contract_id}/evidence`
-- `GET /cel/contracts/{contract_id}/events`
+- `GET /cel/contracts/{contract_id}/evidence?format=json`
+- `GET /cel/contracts/{contract_id}/proof?format=json`
+- `GET /cel/contracts/{contract_id}/proof-bundle?format=json`
 
-Optional, depending on deployment:
+Optional hosted commerce endpoints:
 
-- `POST /cel/contracts/{contract_id}/anchors`
-- `GET /cel/contracts/{contract_id}/anchors`
+- `POST /commerce/intents`
+- `POST /commerce/accepts`
 
-## Canonical Flows
+## Canonical Flow
 
-### 1) Create Contract -> Approvals -> Evidence Verify
+1. Create contract.
+2. Populate required variables.
+3. Execute action(s); respond to approval requests when needed.
+4. Fetch evidence/proof artifacts.
+5. Verify artifacts offline before trusting final state.
 
-1. Agent creates contract.
-2. Agent fills variables.
-3. Agent attempts action (`SEND_FOR_SIGNATURE` or other).
-4. If blocked on approval, a human submits `:decide` with `sig-v1`.
-5. Contract progresses.
-6. Agent fetches evidence bundle.
-7. Agent verifies bundle with EVP before trusting state.
+## Security Notes
 
-### 2) Stripe Webhook -> Receipt Captured -> Evidence Verify
+- Never sign non-canonical payload variants.
+- Validate `context` when using signature envelopes.
+- Verify proofs/evidence offline before settlement decisions.
+- Rotate keys with `key_id` if your key management supports it.
 
-1. Signature provider posts webhook.
-2. Node verifies signature and records `webhook_receipts_v2`.
-3. Receipt is linked to contract when possible.
-4. Agent fetches evidence bundle.
-5. Agent verifies EVP; receipts appear in `webhook_receipts` artifact.
-
-### 3) Anchor Bundle Hash (Optional) -> Evidence Verify
-
-1. Agent (or operator) requests anchor for `bundle_hash`/`manifest_hash`.
-2. Node stores anchor result (`anchors_v1`).
-3. Agent fetches evidence bundle.
-4. Agent verifies EVP and inspects `anchors` artifact as additional attestation.
-
-## Protocol Identity Recommendation
-
-Use an algorithm-neutral agent identity string:
-
-`agent_id = "agent:" + algorithm + ":" + sha256(public_key_bytes)[:32]`
-
-Example:
-
-`agent:ed25519:7f5c9e1a2b3c4d5e6f708192a3b4c5d6`
-
-`key_id` in `sig-v1` is optional, but recommended to support key rotation and audit traceability.
-
-## Security Guidance
-
-- `issued_at` is required in `sig-v1` and should always be UTC RFC3339Nano.
-- Agents should verify evidence bundles after execution before treating actions as final.
-- Keep private keys isolated and rotate keys with clear `key_id` lifecycle.
-
-## Go Snippet: Create sig-v1 Envelope + Decide
+## Go Snippet (sig-v1 signing shape)
 
 ```go
-payload := map[string]any{
-  "contract_id": contractID,
-  "approval_request_id": approvalRequestID,
-  "nonce": nonce,
-}
-hashHex, _, _ := evidencehash.CanonicalSHA256(payload) // lowercase hex
-hashBytes, _ := hex.DecodeString(hashHex)
-sig := ed25519.Sign(privateKey, hashBytes)
+payloadHashHex := evidencehash.CanonicalSHA256(payload)
+payloadHashBytes, _ := hex.DecodeString(payloadHashHex)
+sig := ed25519.Sign(privateKey, payloadHashBytes)
 
 env := signature.EnvelopeV1{
-  Version: "sig-v1",
-  Algorithm: "ed25519",
-  PublicKey: base64.StdEncoding.EncodeToString(publicKey),
-  Signature: base64.StdEncoding.EncodeToString(sig),
-  PayloadHash: hashHex,
-  IssuedAt: time.Now().UTC().Format(time.RFC3339Nano),
-  Context: "contract-action",
-}
-
-// POST /cel/approvals/{approval_request_id}:decide
-// body includes actor_context, decision, signed_payload, signature_envelope
-```
-
-## Go Snippet: Verify Evidence Bundle with EVP
-
-```go
-respBytes := mustHTTPGet("/cel/contracts/" + contractID + "/evidence")
-result, err := evp.VerifyBundleJSON(respBytes)
-if err != nil || result.Status != evp.StatusVerified {
-  return fmt.Errorf("evidence verification failed: %v status=%s", err, result.Status)
+  Version:     "sig-v1",
+  Algorithm:   "ed25519",
+  PublicKey:   base64.StdEncoding.EncodeToString(publicKey),
+  Signature:   base64.StdEncoding.EncodeToString(sig),
+  PayloadHash: payloadHashHex,
+  IssuedAt:    time.Now().UTC().Format(time.RFC3339Nano),
+  Context:     "contract-action",
 }
 ```
+
+## See Also
+
+- `docs/INTEGRATOR_START_HERE.md`
+- `docs/API_SPEC.md`
+- `docs/PROTOCOL.md`
+- `docs/CONFORMANCE.md`

@@ -1,212 +1,72 @@
-
-````markdown
 # Agent Quickstart
 
-This guide shows the minimal lifecycle for agent-to-agent commerce using Contract Lane v1.0.0.
+This quickstart is the shortest practical path for an agent integrator.
 
-It assumes:
-- The reference server is running locally
-- You can generate Ed25519 signatures
-- You can make HTTP requests
+## Prerequisites
 
----
+- A running Contract Lane node.
+- An agent signing key (`ed25519` recommended).
+- API access token/scopes for the target deployment.
 
-## 1. Create a Contract
+## 1) Create a Contract
 
-Create a deterministic contract object representing agreed terms.
+Call:
 
-Example:
+`POST /cel/contracts`
 
-```json
-{
-  "service": "api_usage",
-  "rate": "0.05",
-  "currency": "USD",
-  "max_spend": "1000",
-  "duration_days": 30
-}
-````
+Store returned `contract_id`.
 
-POST to:
+## 2) Populate Variables
 
-```
-POST /cel/contracts
-```
+Call:
 
-The server returns a `contract_id`.
+`POST /cel/contracts/{contract_id}/variables:bulkSet`
 
----
+## 3) Execute Contract Action
 
-## 2. Sign the Contract (sig-v1)
+Call:
 
-Both agents sign the canonical payload hash of the contract using `sig-v1`.
+`POST /cel/contracts/{contract_id}/actions/{action}`
 
-Signature envelope format:
+If the response indicates approval is required, proceed to step 4.
 
-```json
-{
-  "version": "sig-v1",
-  "algorithm": "ed25519",
-  "public_key": "...",
-  "signature": "...",
-  "payload_hash": "...",
-  "issued_at": "RFC3339 UTC Z",
-  "context": "contract-action"
-}
-```
+## 4) Decide Approval (sig-v1)
 
-Submit the signature via:
+Call:
 
-```
-POST /cel/contracts/{id}/actions/sign
-```
+`POST /cel/approvals/{approval_request_id}:decide`
 
-Once both required parties sign, contract state transitions deterministically.
+Include:
 
----
+- `signed_payload`
+- `signature_envelope` (`sig-v1`, context `contract-action` when present)
 
-## 3. Submit Commerce Intent (Buyer)
+## 5) Fetch Evidence / Proof
 
-The buyer agent submits a commerce intent:
+- `GET /cel/contracts/{contract_id}/evidence?format=json`
+- `GET /cel/contracts/{contract_id}/proof?format=json`
+- `GET /cel/contracts/{contract_id}/proof-bundle?format=json`
 
-```
-POST /commerce/intents
-```
+For proof bundle:
 
-This includes:
+- `proof_id = sha256_hex(canonical_json(proof))`
 
-* Contract reference
-* Amount (amount-v1 normalized)
-* Currency
-* Nonce
-* Signature (sig-v1, context="commerce-intent")
+## 6) Verify Offline
 
----
+- Verify evidence with EVP.
+- Verify proof/proof-bundle with SDK verifier helpers.
 
-## 4. Submit Commerce Accept (Seller)
+## Optional Hosted Commerce
 
-The seller submits a matching accept:
+- `POST /commerce/intents` (context `commerce-intent`)
+- `POST /commerce/accepts` (context `commerce-accept`)
 
-```
-POST /commerce/accepts
-```
+## Protocol Identifier Note
 
-Signed using context `"commerce-accept"`.
+The following identifiers are intentionally different by surface:
 
----
+- Capability discovery: `protocol.name="contractlane"`, version `v1`
+- Settlement proof: `protocol="contractlane"`, version `v1`
+- Proof bundle: `protocol="contract-lane"`, version `1`
 
-## 5. Settlement Event Occurs
-
-A payment provider (e.g., Stripe) triggers a webhook.
-
-The server derives a deterministic settlement attestation artifact:
-
-* PAID
-* FAILED
-* REFUNDED
-* DISPUTED
-
-Settlement is cryptographically bound to:
-
-* Contract ID
-* Intent hash
-* Amount (exact string match)
-
----
-
-## 6. Export Proof Bundle
-
-At any time:
-
-```
-GET /cel/contracts/{id}/proof-bundle?format=json
-```
-
-Returns:
-
-```json
-{
-  "proof": { ... },
-  "proof_id": "..."
-}
-```
-
-Where:
-
-```
-proof_id = sha256_hex(canonical_json(proof))
-```
-
-This proof bundle contains:
-
-* Contract snapshot
-* Signatures
-* Commerce artifacts
-* Delegations
-* Revocations
-* Settlement attestations
-
----
-
-## 7. Verify Offline
-
-Using the SDK:
-
-```
-verify_proof_bundle_v1(proof)
-```
-
-Verification checks:
-
-* Canonical hash consistency
-* Signature validity
-* Delegation + revocation rules
-* Settlement requirements
-* Rules-v1 predicates
-
-If valid, the proof is independently verifiable without server access.
-
----
-
-# What Contract Lane Does
-
-* Deterministic contract state transitions
-* Canonical hashing of governed actions
-* Verifiable delegation and revocation
-* Cryptographic settlement semantics
-* Portable proof bundles
-
-# What It Does Not Do
-
-* Negotiate legal language
-* Interpret ambiguous clauses
-* Replace payment processors
-* Replace identity providers
-* Replace human legal review
-
-It is the deterministic settlement and authorization layer beneath agent commerce.
-
----
-
-# Minimal Lifecycle Summary
-
-1. Negotiate terms (outside Contract Lane)
-2. Create structured contract
-3. Sign deterministically
-4. Execute commerce
-5. Derive settlement
-6. Export proof bundle
-7. Verify independently
-
----
-
-For full protocol details, see:
-
-* PROTOCOL.md
-* PROOF_BUNDLE_V1.md
-* EVIDENCE_V1.md
-* RULES_V1.md
-
-```
-
-
+Use `docs/PROTOCOL.md` as the authoritative source.

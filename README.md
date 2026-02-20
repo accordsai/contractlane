@@ -23,6 +23,7 @@ NOTE: to make this production safe you will need some kind of SSL termination, o
 
 ## Specs
 
+- `docs/INTEGRATOR_START_HERE.md`
 - `docs/PROTOCOL.md`
 - `docs/SIG_V1.md`
 - `docs/AGENT_ID_V1.md`
