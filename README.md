@@ -45,3 +45,14 @@ NOTE: to make this production safe you will need some kind of SSL termination, o
 - `docs/STATE_MACHINE.md`
 - `docs/GATING.md`
 - `docs/DB_SCHEMA.md`
+- `docs/ONBOARDING_SERVICE.md`
+- `docs/PUBLISH_CHECKLIST.md`
+
+## Onboarding Control Plane
+
+- New companion service: `services/onboarding` (default port `8084`)
+- Purpose: org/project bootstrap, IAL principal provisioning, agent credential issuance
+- Runs as an overlay stack alongside existing Contract Lane services using `docker-compose.onboarding.yml`
+- Bring up with `make onboarding-up`, validate with `make onboarding-smoke`, tear down with `make onboarding-down`
+- Overlay services attach to `${CONTRACTLANE_SHARED_NETWORK}` (default `accords_default`) so onboarding can reach existing `postgres` and `ial` hosts
+- Public ingress recommendation: reverse-proxy `/onboarding/*` to onboarding service; keep IAL private

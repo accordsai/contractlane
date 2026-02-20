@@ -44,6 +44,11 @@
 - POST /exec/webhooks/esign/{provider}
 - POST /webhooks/{provider}/{endpoint_token}
 
+## Onboarding (Control Plane)
+- POST /onboarding/v1/orgs
+- POST /onboarding/v1/orgs/{org_id}/projects
+- POST /onboarding/v1/projects/{project_id}/agents
+
 ## Approval Decide Payload (sig-v1 support)
 
 `POST /cel/approvals/{approval_request_id}:decide` accepts the existing fields and additionally supports:

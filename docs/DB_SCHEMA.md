@@ -74,3 +74,17 @@ Indexes / constraints:
 - check `status in ('PENDING','CONFIRMED','FAILED')`
 - index `(principal_id, contract_id, created_at desc)`
 - index `(principal_id, target, target_hash)`
+
+## Onboarding Control Plane
+
+`onboarding_*` tables (introduced in migration `000017_onboarding_control_plane`) support hosted/on-prem onboarding orchestration without changing protocol semantics.
+
+Primary tables:
+
+- `onboarding_orgs`
+- `onboarding_users`
+- `onboarding_memberships`
+- `onboarding_projects` (maps org project -> `principals.principal_id`)
+- `onboarding_credentials` (stores hashed issued tokens + actor linkage)
+- `onboarding_idempotency_records`
+- `onboarding_audit_events`

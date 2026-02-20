@@ -34,6 +34,7 @@ Hosted deployment (most integrators):
 - Use provider-issued credentials and IDs (`principal_id`, `actor_id`, token).
 - Call CEL endpoints directly.
 - Do not assume `/ial/*` endpoints are publicly exposed.
+- Credentials may be issued via onboarding control plane (`docs/ONBOARDING_SERVICE.md`).
 
 Self-hosted deployment:
 

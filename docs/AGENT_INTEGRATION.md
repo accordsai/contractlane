@@ -16,6 +16,7 @@ An integrating agent should implement:
 - Running CEL/IAL/Execution yourself (optional if you use a hosted node).
 - Webhook ingestion implementation.
 - Anchoring implementation.
+- Running onboarding service yourself (optional if your provider issues credentials out of band).
 
 ## Agent Identity (v1)
 
@@ -121,3 +122,4 @@ env := signature.EnvelopeV1{
 - `docs/API_SPEC.md`
 - `docs/PROTOCOL.md`
 - `docs/CONFORMANCE.md`
+- `docs/ONBOARDING_SERVICE.md`

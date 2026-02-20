@@ -1,0 +1,32 @@
+services:
+  onboarding:
+    build:
+      context: .
+      dockerfile: services/onboarding/Dockerfile.prod
+    environment:
+      DATABASE_URL: ${ONBOARDING_DATABASE_URL}
+      SERVICE_PORT: ${ONBOARDING_SERVICE_PORT:-8084}
+      IAL_BASE_URL: ${ONBOARDING_IAL_BASE_URL}
+      ONBOARDING_BOOTSTRAP_TOKEN: ${ONBOARDING_BOOTSTRAP_TOKEN}
+    ports:
+      - "${ONBOARDING_PUBLIC_PORT:-8084}:8084"
+    networks:
+      - shared
+    restart: unless-stopped
+
+  onboarding-migrate:
+    image: migrate/migrate:v4.17.1
+    working_dir: /work
+    volumes:
+      - ./:/work
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        migrate -path /work/migrations -database "${ONBOARDING_DATABASE_URL}" up
+    networks:
+      - shared
+
+networks:
+  shared:
+    external: true
+    name: ${CONTRACTLANE_SHARED_NETWORK:-accords_default}

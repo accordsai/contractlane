@@ -3,7 +3,7 @@ SHELL := /bin/bash
 PY_SDK_VENV := sdk/python/.venv
 PY_SDK_PYTHON := $(PY_SDK_VENV)/bin/python
 
-.PHONY: up up-dev up-prod down down-prod migrate migrate-prod test smoke logs logs-prod fmt sdk-test sdk-conformance wait-ready wait-ready-prod sdk-python-venv test-sdk-python sdk-sanity
+.PHONY: up up-dev up-prod down down-prod migrate migrate-prod test smoke logs logs-prod fmt sdk-test sdk-conformance wait-ready wait-ready-prod sdk-python-venv test-sdk-python sdk-sanity onboarding-up onboarding-down onboarding-migrate onboarding-smoke
 
 up:
 	docker compose -f docker-compose.dev.yml up --build -d
@@ -59,6 +59,28 @@ migrate:
 
 migrate-prod:
 	docker compose -f docker-compose.prod.yml run --rm migrate
+
+onboarding-up:
+	$(MAKE) onboarding-migrate
+	docker compose -f docker-compose.onboarding.yml up --build -d onboarding
+	@for i in {1..90}; do \
+		if curl -sf http://localhost:8084/health >/dev/null; then \
+			echo "onboarding ready"; \
+			exit 0; \
+		fi; \
+		sleep 2; \
+	done; \
+	echo "onboarding not ready"; \
+	exit 1
+
+onboarding-migrate:
+	docker compose -f docker-compose.onboarding.yml run --rm onboarding-migrate
+
+onboarding-smoke:
+	bash scripts/smoke_onboarding.sh
+
+onboarding-down:
+	docker compose -f docker-compose.onboarding.yml down
 
 test:
 	go test ./... -count=1
