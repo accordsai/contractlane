@@ -184,6 +184,36 @@ class ContractLaneClient:
     def getContract(self, contract_id: str) -> Dict[str, Any]:
         return self.get_contract(contract_id)
 
+    def create_contract(
+        self,
+        actor_context: Dict[str, Any],
+        template_id: str,
+        counterparty: Dict[str, Any],
+        initial_variables: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "actor_context": actor_context,
+            "template_id": template_id,
+            "counterparty": counterparty,
+        }
+        if initial_variables is not None:
+            body["initial_variables"] = initial_variables
+        return self._request("POST", "/cel/contracts", body, None, True)
+
+    def createContract(
+        self,
+        actor_context: Dict[str, Any],
+        template_id: str,
+        counterparty: Dict[str, Any],
+        initial_variables: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        return self.create_contract(
+            actor_context=actor_context,
+            template_id=template_id,
+            counterparty=counterparty,
+            initial_variables=initial_variables,
+        )
+
     def evidence(self, gate_key: str, external_subject_id: str) -> Dict[str, Any]:
         path = f"/cel/gates/{quote(gate_key, safe='')}/evidence?external_subject_id={quote(external_subject_id, safe='')}"
         raw = self._request("GET", path, None, None, True)

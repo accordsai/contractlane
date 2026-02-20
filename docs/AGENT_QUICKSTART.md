@@ -7,6 +7,7 @@ This quickstart is the shortest practical path for an agent integrator.
 - A running Contract Lane node.
 - An agent signing key (`ed25519` recommended).
 - API access token/scopes for the target deployment.
+- Hosted mode: obtain `principal_id` + `actor_id` + token from your provider onboarding flow (do not assume public `/ial/*` access).
 
 ## 1) Create a Contract
 
@@ -15,6 +16,12 @@ Call:
 `POST /cel/contracts`
 
 Store returned `contract_id`.
+
+SDK wrappers:
+
+- Go: `CreateContract(...)`
+- Python: `create_contract(...)`
+- TypeScript: `createContract(...)`
 
 ## 2) Populate Variables
 

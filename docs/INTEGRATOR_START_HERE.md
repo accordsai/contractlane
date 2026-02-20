@@ -27,6 +27,19 @@ This is the canonical onboarding page for external agent integrators.
 - `GET /cel/contracts/{contract_id}/evidence?format=json`
 - `GET /cel/contracts/{contract_id}/proof-bundle?format=json`
 
+## Identity Provisioning (Hosted vs Self-Hosted)
+
+Hosted deployment (most integrators):
+
+- Use provider-issued credentials and IDs (`principal_id`, `actor_id`, token).
+- Call CEL endpoints directly.
+- Do not assume `/ial/*` endpoints are publicly exposed.
+
+Self-hosted deployment:
+
+- You may expose and use IAL routes (for example `POST /ial/principals`, `POST /ial/actors/agents`).
+- If IAL is on a separate host, configure SDK/app `CONTRACTLANE_IAL_BASE_URL` accordingly.
+
 ## Agent Identity + Signature Contexts
 
 - Agent IDs: `agent:pk:ed25519:<base64url_no_padding_32_byte_pubkey>`

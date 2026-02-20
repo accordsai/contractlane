@@ -38,6 +38,54 @@ test('error model 401 surfaces structured error', async () => {
   await assert.rejects(async () => client.gateStatus('terms_current', 'unauth'));
 });
 
+test('createContract request/response parity', async () => {
+  let capturedPath = '';
+  let capturedBody: Record<string, unknown> = {};
+  const fetchFn: typeof fetch = async (url, init) => {
+    capturedPath = new URL(String(url)).pathname;
+    capturedBody = JSON.parse(String(init?.body ?? '{}'));
+    return new Response(JSON.stringify({
+      contract: {
+        contract_id: 'ctr_123',
+        state: 'DRAFT_CREATED',
+        template_id: 'tpl_1',
+      },
+    }), { status: 201 }) as any;
+  };
+  const client = new ContractLaneClient({ baseUrl: 'http://example.com', auth: new PrincipalAuth('tok'), fetchFn });
+  const out = await client.createContract({
+    actor_context: { principal_id: 'prn_1', actor_id: 'act_1', actor_type: 'AGENT' },
+    template_id: 'tpl_1',
+    counterparty: { name: 'Buyer', email: 'buyer@example.com' },
+    initial_variables: { price: '10' },
+  });
+  assert.equal(capturedPath, '/cel/contracts');
+  assert.equal((capturedBody.actor_context as Record<string, unknown>).principal_id, 'prn_1');
+  assert.equal(capturedBody.template_id, 'tpl_1');
+  assert.equal((out.contract as Record<string, unknown>).contract_id, 'ctr_123');
+});
+
+test('createContract error mapping parity', async () => {
+  const fetchFn: typeof fetch = async () =>
+    new Response(
+      JSON.stringify({
+        error: { code: 'BAD_REQUEST', message: 'template missing' },
+        request_id: 'req_123',
+      }),
+      { status: 400 },
+    ) as any;
+  const client = new ContractLaneClient({ baseUrl: 'http://example.com', auth: new PrincipalAuth('tok'), fetchFn, retry: { maxAttempts: 1 } });
+  await assert.rejects(
+    () =>
+      client.createContract({
+        actor_context: { principal_id: 'prn_1', actor_id: 'act_1', actor_type: 'AGENT' },
+        template_id: '',
+        counterparty: { name: 'Buyer', email: 'buyer@example.com' },
+      }),
+    (err: any) => err?.status_code === 400 && err?.error_code === 'BAD_REQUEST',
+  );
+});
+
 test('conformance cases exist', () => {
   const root = path.resolve(process.cwd(), '..', '..');
   const names = [

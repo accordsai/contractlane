@@ -40,6 +40,48 @@ Optional hosted commerce endpoints:
 - `POST /commerce/intents`
 - `POST /commerce/accepts`
 
+## SDK Contract Creation Snippets
+
+Go:
+
+```go
+resp, err := client.CreateContract(ctx, contractlane.CreateContractRequest{
+  ActorContext: contractlane.ActorContext{
+    PrincipalID: "prn_123",
+    ActorID:     "act_123",
+    ActorType:   "AGENT",
+  },
+  TemplateID: "tpl_terms_v1",
+  Counterparty: contractlane.CreateContractCounterparty{
+    Name:  "Buyer",
+    Email: "buyer@example.com",
+  },
+  InitialVariables: map[string]string{"price": "10"},
+})
+```
+
+Python:
+
+```python
+resp = client.create_contract(
+    actor_context={"principal_id": "prn_123", "actor_id": "act_123", "actor_type": "AGENT"},
+    template_id="tpl_terms_v1",
+    counterparty={"name": "Buyer", "email": "buyer@example.com"},
+    initial_variables={"price": "10"},
+)
+```
+
+TypeScript:
+
+```ts
+const resp = await client.createContract({
+  actor_context: { principal_id: "prn_123", actor_id: "act_123", actor_type: "AGENT" },
+  template_id: "tpl_terms_v1",
+  counterparty: { name: "Buyer", email: "buyer@example.com" },
+  initial_variables: { price: "10" },
+});
+```
+
 ## Canonical Flow
 
 1. Create contract.

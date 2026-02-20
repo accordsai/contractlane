@@ -69,6 +69,46 @@ def test_error_model_401():
         c.gate_status("terms_current", "sub")
 
 
+def test_create_contract_request_and_response():
+    captured = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured["path"] = req.url.path
+        captured["json"] = json.loads(req.content.decode("utf-8"))
+        return httpx.Response(201, json={"contract": {"contract_id": "ctr_123", "state": "DRAFT_CREATED", "template_id": "tpl_1"}})
+
+    c = ContractLaneClient("http://x", PrincipalAuth("tok"))
+    c.http = httpx.Client(transport=httpx.MockTransport(handler))
+    out = c.create_contract(
+        actor_context={"principal_id": "prn_1", "actor_id": "act_1", "actor_type": "AGENT"},
+        template_id="tpl_1",
+        counterparty={"name": "Buyer", "email": "buyer@example.com"},
+        initial_variables={"price": "10"},
+    )
+    assert captured["path"] == "/cel/contracts"
+    assert captured["json"]["template_id"] == "tpl_1"
+    assert captured["json"]["actor_context"]["principal_id"] == "prn_1"
+    assert out["contract"]["contract_id"] == "ctr_123"
+
+
+def test_create_contract_error_mapping_parity():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"code": "BAD_REQUEST", "message": "template missing"}, "request_id": "req_123"})
+
+    c = ContractLaneClient("http://x", PrincipalAuth("tok"))
+    c.http = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(Exception) as ex:
+        c.create_contract(
+            actor_context={"principal_id": "prn_1", "actor_id": "act_1", "actor_type": "AGENT"},
+            template_id="",
+            counterparty={"name": "Buyer", "email": "buyer@example.com"},
+        )
+    err = ex.value
+    assert getattr(err, "status_code", None) == 400
+    assert getattr(err, "error_code", None) == "BAD_REQUEST"
+    assert str(err) == "template missing"
+
+
 def test_conformance_cases_exist():
     root = Path(__file__).resolve().parents[3]
     for name in [

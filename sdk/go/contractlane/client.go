@@ -81,6 +81,23 @@ type Contract struct {
 	Raw             map[string]any `json:"-"`
 }
 
+type CreateContractCounterparty struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+}
+
+type CreateContractRequest struct {
+	ActorContext     ActorContext               `json:"actor_context"`
+	TemplateID       string                     `json:"template_id"`
+	Counterparty     CreateContractCounterparty `json:"counterparty"`
+	InitialVariables map[string]string          `json:"initial_variables,omitempty"`
+}
+
+type CreateContractResponse struct {
+	Contract *Contract      `json:"contract,omitempty"`
+	Raw      map[string]any `json:"-"`
+}
+
 type ContractRender struct {
 	ContractID         string            `json:"contract_id"`
 	PrincipalID        string            `json:"principal_id,omitempty"`
@@ -412,6 +429,32 @@ func (c *Client) ContractAction(ctx context.Context, contractID, action string, 
 		return nil, err
 	}
 	return parseActionResult(payload), nil
+}
+
+func (c *Client) CreateContract(ctx context.Context, req CreateContractRequest) (*CreateContractResponse, error) {
+	body := map[string]any{
+		"actor_context": req.ActorContext,
+		"template_id":   req.TemplateID,
+		"counterparty": map[string]any{
+			"name":  req.Counterparty.Name,
+			"email": req.Counterparty.Email,
+		},
+	}
+	if req.InitialVariables != nil {
+		body["initial_variables"] = req.InitialVariables
+	}
+
+	payload, err := c.do(ctx, http.MethodPost, "/cel/contracts", body, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	out := &CreateContractResponse{Raw: payload}
+	contractRaw, _ := payload["contract"].(map[string]any)
+	if contractRaw == nil {
+		contractRaw = payload
+	}
+	out.Contract = parseContract(contractRaw)
+	return out, nil
 }
 
 func (c *Client) GetContract(ctx context.Context, contractID string) (*Contract, error) {

@@ -13,6 +13,26 @@ export type NextStep = { type?: string; continue_url?: string; [k: string]: unkn
 export type GateResult = { status: 'DONE' | 'BLOCKED'; nextStep?: NextStep | null; remediation?: Record<string, unknown>; raw: Record<string, unknown> };
 export type ActionResult = { result: 'DONE' | 'BLOCKED' | 'REJECTED'; nextStep?: NextStep | null; rejection?: { reason?: string; errorCode?: string }; remediation?: Record<string, unknown>; raw: Record<string, unknown> };
 export type Contract = { id: string; state?: string; template_id?: string; template_version?: string; raw: Record<string, unknown> };
+export type ActorContext = {
+  principal_id: string;
+  actor_id: string;
+  actor_type: string;
+  idempotency_key?: string;
+};
+export type CreateContractCounterparty = {
+  name: string;
+  email: string;
+};
+export type CreateContractInput = {
+  actor_context: ActorContext;
+  template_id: string;
+  counterparty: CreateContractCounterparty;
+  initial_variables?: Record<string, string>;
+};
+export type CreateContractResponse = {
+  contract?: Record<string, unknown>;
+  raw: Record<string, unknown>;
+};
 export type Evidence = Record<string, unknown>;
 export type ContractEvidenceBundle = Record<string, unknown>;
 export type CommerceAmountV1 = { currency: string; amount: string };
@@ -279,6 +299,14 @@ export class ContractLaneClient {
       template_id: c.template_id as string | undefined,
       template_version: c.template_version as string | undefined,
       raw: c,
+    };
+  }
+
+  async createContract(input: CreateContractInput): Promise<CreateContractResponse> {
+    const raw = await this.request('POST', '/cel/contracts', input, undefined, true);
+    return {
+      contract: raw.contract as Record<string, unknown> | undefined,
+      raw,
     };
   }
 

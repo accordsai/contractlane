@@ -193,6 +193,89 @@ func TestSDKConformanceCases(t *testing.T) {
 	}
 }
 
+func TestCreateContract_RequestAndResponse(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"contract": map[string]any{
+				"contract_id": "ctr_123",
+				"state":       "DRAFT_CREATED",
+				"template_id": "tpl_1",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, PrincipalAuth{Token: "tok"})
+	resp, err := c.CreateContract(context.Background(), CreateContractRequest{
+		ActorContext: ActorContext{
+			PrincipalID: "prn_1",
+			ActorID:     "act_1",
+			ActorType:   "AGENT",
+		},
+		TemplateID: "tpl_1",
+		Counterparty: CreateContractCounterparty{
+			Name:  "Buyer",
+			Email: "buyer@example.com",
+		},
+		InitialVariables: map[string]string{"price": "10"},
+	})
+	if err != nil {
+		t.Fatalf("CreateContract: %v", err)
+	}
+	if gotPath != "/cel/contracts" {
+		t.Fatalf("unexpected path: %s", gotPath)
+	}
+	if gotBody["template_id"] != "tpl_1" {
+		t.Fatalf("unexpected template_id: %#v", gotBody["template_id"])
+	}
+	ac, _ := gotBody["actor_context"].(map[string]any)
+	if ac == nil || ac["principal_id"] != "prn_1" || ac["actor_id"] != "act_1" || ac["actor_type"] != "AGENT" {
+		t.Fatalf("unexpected actor_context: %#v", gotBody["actor_context"])
+	}
+	if resp == nil || resp.Contract == nil || resp.Contract.ContractID != "ctr_123" {
+		t.Fatalf("unexpected response: %#v", resp)
+	}
+}
+
+func TestCreateContract_ErrorMapping(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":    "BAD_REQUEST",
+				"message": "template missing",
+			},
+			"request_id": "req_123",
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, PrincipalAuth{Token: "tok"})
+	_, err := c.CreateContract(context.Background(), CreateContractRequest{
+		ActorContext: ActorContext{PrincipalID: "prn_1", ActorID: "act_1", ActorType: "AGENT"},
+		TemplateID:   "",
+		Counterparty: CreateContractCounterparty{Name: "Buyer", Email: "buyer@example.com"},
+	})
+	if err == nil {
+		t.Fatalf("expected sdk error")
+	}
+	sdkErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if sdkErr.StatusCode != 400 || sdkErr.ErrorCode != "BAD_REQUEST" || sdkErr.Message != "template missing" {
+		t.Fatalf("unexpected error mapping: %#v", sdkErr)
+	}
+}
+
 func TestConformanceCasesExist(t *testing.T) {
 	_, filename, _, _ := runtime.Caller(0)
 	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", "..", ".."))
