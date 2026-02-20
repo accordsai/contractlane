@@ -7,6 +7,7 @@ PY_SDK_PYTHON := $(PY_SDK_VENV)/bin/python
 
 up:
 	docker compose -f docker-compose.dev.yml up --build -d
+        sleep 2
 	$(MAKE) migrate
 	$(MAKE) wait-ready
 
