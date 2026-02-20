@@ -27,6 +27,16 @@ Environment:
 - `ONBOARDING_DATABASE_URL=postgres://contractlane:...@postgres:5432/contractlane?sslmode=disable`
 - `ONBOARDING_IAL_BASE_URL=http://ial:8081/ial`
 - `ONBOARDING_BOOTSTRAP_TOKEN=<strong-secret>`
+- `ONBOARDING_SIGNUP_TTL_MINUTES=15`
+- `ONBOARDING_SIGNUP_MAX_ATTEMPTS=5`
+- `ONBOARDING_PUBLIC_SIGNUP_DEV_MODE=false` (set `true` only for non-production testing)
+- `ONBOARDING_PUBLIC_SIGNUP_CHALLENGE_TOKEN=<optional-shared-challenge-token>`
+- `ONBOARDING_PUBLIC_SIGNUP_START_IP_RATE_PER_MINUTE=20`
+- `ONBOARDING_PUBLIC_SIGNUP_START_EMAIL_RATE_PER_HOUR=5`
+- `ONBOARDING_PUBLIC_SIGNUP_VERIFY_IP_RATE_PER_MINUTE=60`
+- `ONBOARDING_PUBLIC_SIGNUP_COMPLETE_IP_RATE_PER_MINUTE=10`
+- `ONBOARDING_PUBLIC_SIGNUP_ALLOWED_EMAIL_DOMAINS=` (optional CSV allowlist)
+- `ONBOARDING_PUBLIC_SIGNUP_DENIED_EMAIL_DOMAINS=` (optional CSV denylist)
 
 Commands:
 
@@ -49,9 +59,18 @@ Base path: `/onboarding/v1`
 - `POST /orgs/{org_id}/projects`
 - `POST /projects/{project_id}/agents`
 
+Public signup phase A:
+
+- `POST /public/v1/signup/start`
+- `POST /public/v1/signup/verify`
+- `GET /public/v1/signup/{session_id}`
+- `POST /public/v1/signup/complete` (phase C provisioning bridge)
+
 Auth:
 
 - Bearer token (`Authorization: Bearer <ONBOARDING_BOOTSTRAP_TOKEN>`)
+- Public signup endpoints are intentionally unauthenticated in Phase A and must be protected by network controls/rate limiting upstream.
+- If `ONBOARDING_PUBLIC_SIGNUP_CHALLENGE_TOKEN` is set, clients must send `X-Signup-Challenge: <token>`.
 
 Idempotency:
 
@@ -101,13 +120,57 @@ For agent integrators:
 3. Use Contract Lane SDKs against CEL with those credentials.
 4. Do not call IAL directly from public agents in hosted mode.
 
-## Nginx Routing
+Public self-signup (phase C):
 
-Use existing nginx and add onboarding path routing in the TLS server block:
+1. Start signup session via `POST /public/v1/signup/start`.
+2. Verify challenge via `POST /public/v1/signup/verify`.
+3. Complete provisioning via `POST /public/v1/signup/complete` to receive one-time credential bundle.
+
+## Reverse Proxy (Nginx) Changes
+
+Add both public routes:
+
+- `/onboarding/*` -> onboarding control-plane endpoints
+- `/public/*` -> public signup endpoints
+
+Important:
+
+- Place these blocks before your `location /` catch-all.
+- Use `proxy_pass` **without trailing slash** to avoid stripping route prefixes.
+
+If nginx runs in Docker on the same network:
 
 ```nginx
 location ^~ /onboarding/ {
-  proxy_pass http://127.0.0.1:8084/;
+  proxy_pass http://onboarding:8084;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+location ^~ /public/ {
+  proxy_pass http://onboarding:8084;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+If nginx runs directly on host:
+
+```nginx
+location ^~ /onboarding/ {
+  proxy_pass http://127.0.0.1:8084;
+  proxy_set_header Host $host;
+  proxy_set_header X-Real-IP $remote_addr;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+location ^~ /public/ {
+  proxy_pass http://127.0.0.1:8084;
   proxy_set_header Host $host;
   proxy_set_header X-Real-IP $remote_addr;
   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -117,10 +180,20 @@ location ^~ /onboarding/ {
 
 Keep existing CEL route as fallback (`location /`).
 
+## Overlay Compose Notes
+
+When onboarding runs as an overlay against existing Contract Lane containers, ensure:
+
+1. `onboarding` joins `${CONTRACTLANE_SHARED_NETWORK}`.
+2. `ONBOARDING_DATABASE_URL` uses internal `postgres` hostname on that network.
+3. `ONBOARDING_IAL_BASE_URL` uses internal `ial` hostname on that network.
+
 ## Publish Checklist
 
 - Set non-default secrets in `.env`
 - Confirm onboarding can reach `postgres` and `ial` over shared Docker network
+- Confirm `ONBOARDING_PUBLIC_SIGNUP_DEV_MODE=false` in production
+- If public signup is enabled, set `ONBOARDING_PUBLIC_SIGNUP_CHALLENGE_TOKEN` and rate limit values
 - Run:
   - `go test ./... -count=1`
   - `make onboarding-smoke`

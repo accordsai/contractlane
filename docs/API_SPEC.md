@@ -49,6 +49,12 @@
 - POST /onboarding/v1/orgs/{org_id}/projects
 - POST /onboarding/v1/projects/{project_id}/agents
 
+## Public Signup
+- POST /public/v1/signup/start
+- POST /public/v1/signup/verify
+- GET  /public/v1/signup/{session_id}
+- POST /public/v1/signup/complete
+
 ## Approval Decide Payload (sig-v1 support)
 
 `POST /cel/approvals/{approval_request_id}:decide` accepts the existing fields and additionally supports:

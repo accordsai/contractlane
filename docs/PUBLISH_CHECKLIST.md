@@ -12,6 +12,10 @@
 - Run core smoke: `make smoke`
 - Run onboarding smoke (if enabled): `make onboarding-smoke`
 - Run conformance against CEL: `BASE_URL=http://localhost:8082 ./conformance/runner/run_local_conformance.sh`
+- Verify public signup flow (if enabled):
+  - `POST /public/v1/signup/start`
+  - `POST /public/v1/signup/verify`
+  - `POST /public/v1/signup/complete`
 
 ## Docs Required Before Publish
 
@@ -28,7 +32,13 @@
   - `ONBOARDING_IAL_BASE_URL`
   - `ONBOARDING_BOOTSTRAP_TOKEN`
   - `CONTRACTLANE_SHARED_NETWORK`
+- Confirm public signup hardening values:
+  - `ONBOARDING_PUBLIC_SIGNUP_DEV_MODE=false`
+  - `ONBOARDING_PUBLIC_SIGNUP_CHALLENGE_TOKEN` set (if endpoint is internet-exposed)
+  - `ONBOARDING_PUBLIC_SIGNUP_*_RATE_*` tuned for your traffic
+  - `ONBOARDING_PUBLIC_SIGNUP_ALLOWED_EMAIL_DOMAINS`/`DENIED` set per policy
 - Confirm IAL remains private; only CEL/onboarding are externally routed
+- Confirm reverse proxy routes include `/onboarding/` and `/public/` to onboarding service (without trailing-slash path rewrite issues)
 
 ## Cleanup
 

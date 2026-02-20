@@ -2,11 +2,17 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"contractlane/pkg/db"
 	"contractlane/pkg/httpx"
@@ -31,8 +37,16 @@ func main() {
 		ialBase = "http://localhost:8081/ial"
 	}
 	bootstrapToken := strings.TrimSpace(os.Getenv("ONBOARDING_BOOTSTRAP_TOKEN"))
+	signupTTL := envIntDefault("ONBOARDING_SIGNUP_TTL_MINUTES", 15)
+	maxAttempts := envIntDefault("ONBOARDING_SIGNUP_MAX_ATTEMPTS", 5)
+	devExposeCode := strings.EqualFold(strings.TrimSpace(os.Getenv("ONBOARDING_PUBLIC_SIGNUP_DEV_MODE")), "true")
+	publicCfg := loadPublicSignupConfig()
 
 	ial := ialclient.New(ialBase)
+	startIPLimiter := newFixedWindowLimiter(publicCfg.StartIPRatePerMinute, time.Minute)
+	startEmailLimiter := newFixedWindowLimiter(publicCfg.StartEmailRatePerHour, time.Hour)
+	verifyIPLimiter := newFixedWindowLimiter(publicCfg.VerifyIPRatePerMinute, time.Minute)
+	completeIPLimiter := newFixedWindowLimiter(publicCfg.CompleteIPRatePerMinute, time.Minute)
 
 	r := chi.NewRouter()
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
@@ -198,6 +212,337 @@ func main() {
 		})
 	})
 
+	r.Route("/public/v1/signup", func(api chi.Router) {
+		api.Post("/start", func(w http.ResponseWriter, r *http.Request) {
+			if !enforceSignupChallenge(w, r, publicCfg) {
+				return
+			}
+			clientIP := clientIPFromRequest(r)
+			if !enforceRateLimit(w, startIPLimiter, "start_ip:"+clientIP) {
+				return
+			}
+			var req struct {
+				Email   string `json:"email"`
+				OrgName string `json:"org_name"`
+			}
+			if err := httpx.ReadJSON(r, &req); err != nil {
+				httpx.WriteError(w, 400, "BAD_JSON", err.Error(), nil)
+				return
+			}
+			email := strings.ToLower(strings.TrimSpace(req.Email))
+			orgName := strings.TrimSpace(req.OrgName)
+			if email == "" || orgName == "" {
+				httpx.WriteError(w, 400, "BAD_REQUEST", "email and org_name are required", nil)
+				return
+			}
+			if !isSaneEmail(email) {
+				httpx.WriteError(w, 400, "BAD_REQUEST", "email is invalid", nil)
+				return
+			}
+			if !isAllowedSignupEmail(email, publicCfg) {
+				httpx.WriteError(w, 403, "EMAIL_NOT_ALLOWED", "email domain is not allowed", nil)
+				return
+			}
+			if !enforceRateLimit(w, startEmailLimiter, "start_email:"+email) {
+				return
+			}
+			code := randomVerificationCode()
+			sess := store.SignupSession{
+				SessionID:            "sgs_" + uuid.NewString(),
+				Email:                email,
+				OrgName:              orgName,
+				Status:               "PENDING",
+				VerificationCodeHash: store.HashToken(code),
+				ExpiresAt:            time.Now().UTC().Add(time.Duration(signupTTL) * time.Minute),
+			}
+			if err := st.CreateSignupSession(r.Context(), sess); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			resp := map[string]any{
+				"request_id": httpx.NewRequestID(),
+				"signup_session": map[string]any{
+					"session_id": sess.SessionID,
+					"status":     sess.Status,
+					"expires_at": sess.ExpiresAt,
+				},
+				"challenge": map[string]any{
+					"type":      "EMAIL_OTP",
+					"channel":   "email",
+					"recipient": maskEmail(email),
+				},
+			}
+			// Phase A stub to make integration testable before real delivery is wired.
+			if devExposeCode {
+				resp["challenge"] = map[string]any{
+					"type":              "EMAIL_OTP",
+					"channel":           "email",
+					"recipient":         maskEmail(email),
+					"verification_code": code,
+				}
+			}
+			httpx.WriteJSON(w, 201, resp)
+		})
+
+		api.Post("/verify", func(w http.ResponseWriter, r *http.Request) {
+			if !enforceSignupChallenge(w, r, publicCfg) {
+				return
+			}
+			clientIP := clientIPFromRequest(r)
+			if !enforceRateLimit(w, verifyIPLimiter, "verify_ip:"+clientIP) {
+				return
+			}
+			var req struct {
+				SessionID        string `json:"session_id"`
+				VerificationCode string `json:"verification_code"`
+			}
+			if err := httpx.ReadJSON(r, &req); err != nil {
+				httpx.WriteError(w, 400, "BAD_JSON", err.Error(), nil)
+				return
+			}
+			if strings.TrimSpace(req.SessionID) == "" || strings.TrimSpace(req.VerificationCode) == "" {
+				httpx.WriteError(w, 400, "BAD_REQUEST", "session_id and verification_code are required", nil)
+				return
+			}
+			sess, err := st.VerifySignupSession(r.Context(), strings.TrimSpace(req.SessionID), strings.TrimSpace(req.VerificationCode), time.Now().UTC(), maxAttempts)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					httpx.WriteError(w, 404, "NOT_FOUND", "signup session not found", nil)
+					return
+				}
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			if sess.Status == "VERIFIED" {
+				httpx.WriteJSON(w, 200, map[string]any{
+					"request_id": httpx.NewRequestID(),
+					"signup_session": map[string]any{
+						"session_id":  sess.SessionID,
+						"status":      sess.Status,
+						"verified_at": sess.VerifiedAt,
+						"expires_at":  sess.ExpiresAt,
+					},
+				})
+				return
+			}
+			if sess.Status == "EXPIRED" {
+				httpx.WriteError(w, 410, "SIGNUP_SESSION_EXPIRED", "signup session expired", nil)
+				return
+			}
+			httpx.WriteError(w, 401, "INVALID_VERIFICATION_CODE", "verification code is invalid", map[string]any{
+				"attempts": sess.VerificationAttempts,
+			})
+		})
+
+		api.Get("/{session_id}", func(w http.ResponseWriter, r *http.Request) {
+			sessionID := strings.TrimSpace(chi.URLParam(r, "session_id"))
+			sess, err := st.GetSignupSession(r.Context(), sessionID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					httpx.WriteError(w, 404, "NOT_FOUND", "signup session not found", nil)
+					return
+				}
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			status := sess.Status
+			if status != "VERIFIED" && time.Now().UTC().After(sess.ExpiresAt.UTC()) {
+				status = "EXPIRED"
+			}
+			httpx.WriteJSON(w, 200, map[string]any{
+				"request_id": httpx.NewRequestID(),
+				"signup_session": map[string]any{
+					"session_id":            sess.SessionID,
+					"email":                 sess.Email,
+					"org_name":              sess.OrgName,
+					"status":                status,
+					"verification_attempts": sess.VerificationAttempts,
+					"created_at":            sess.CreatedAt,
+					"verified_at":           sess.VerifiedAt,
+					"completed_at":          sess.CompletedAt,
+					"expires_at":            sess.ExpiresAt,
+				},
+			})
+		})
+
+		api.Post("/complete", func(w http.ResponseWriter, r *http.Request) {
+			if !enforceSignupChallenge(w, r, publicCfg) {
+				return
+			}
+			clientIP := clientIPFromRequest(r)
+			if !enforceRateLimit(w, completeIPLimiter, "complete_ip:"+clientIP) {
+				return
+			}
+			var req struct {
+				SessionID    string   `json:"session_id"`
+				Jurisdiction string   `json:"jurisdiction"`
+				Timezone     string   `json:"timezone"`
+				ProjectName  string   `json:"project_name"`
+				AgentName    string   `json:"agent_name"`
+				Scopes       []string `json:"scopes"`
+			}
+			if err := httpx.ReadJSON(r, &req); err != nil {
+				httpx.WriteError(w, 400, "BAD_JSON", err.Error(), nil)
+				return
+			}
+			sessionID := strings.TrimSpace(req.SessionID)
+			if sessionID == "" {
+				httpx.WriteError(w, 400, "BAD_REQUEST", "session_id is required", nil)
+				return
+			}
+			sess, err := st.GetSignupSession(r.Context(), sessionID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					httpx.WriteError(w, 404, "NOT_FOUND", "signup session not found", nil)
+					return
+				}
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+
+			if prov, err := st.GetSignupProvision(r.Context(), sessionID); err == nil {
+				httpx.WriteJSON(w, 200, map[string]any{
+					"request_id": httpx.NewRequestID(),
+					"status":     "ALREADY_COMPLETED",
+					"provisioning": map[string]any{
+						"session_id":    prov.SessionID,
+						"org_id":        prov.OrgID,
+						"project_id":    prov.ProjectID,
+						"principal_id":  prov.PrincipalID,
+						"actor_id":      prov.ActorID,
+						"credential_id": prov.CredentialID,
+					},
+				})
+				return
+			} else if !errors.Is(err, pgx.ErrNoRows) {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+
+			if time.Now().UTC().After(sess.ExpiresAt.UTC()) {
+				httpx.WriteError(w, 410, "SIGNUP_SESSION_EXPIRED", "signup session expired", nil)
+				return
+			}
+			if sess.Status != "VERIFIED" {
+				httpx.WriteError(w, 409, "SIGNUP_SESSION_NOT_VERIFIED", "signup session must be VERIFIED before completion", nil)
+				return
+			}
+
+			jurisdiction := strings.TrimSpace(req.Jurisdiction)
+			if jurisdiction == "" {
+				jurisdiction = "US"
+			}
+			timezone := strings.TrimSpace(req.Timezone)
+			if timezone == "" {
+				timezone = "UTC"
+			}
+			projectName := strings.TrimSpace(req.ProjectName)
+			if projectName == "" {
+				projectName = "Default Project"
+			}
+			agentName := strings.TrimSpace(req.AgentName)
+			if agentName == "" {
+				agentName = "Default Agent"
+			}
+			if len(req.Scopes) == 0 {
+				req.Scopes = []string{"cel.contracts:write"}
+			}
+
+			org := store.Org{
+				OrgID: "org_" + uuid.NewString(),
+				Name:  sess.OrgName,
+			}
+			user := store.User{
+				UserID: "usr_" + uuid.NewString(),
+				Email:  sess.Email,
+			}
+			owner, err := st.CreateOrgWithOwner(r.Context(), org, user)
+			if err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			principal, err := ial.CreatePrincipal(sess.OrgName, jurisdiction, timezone)
+			if err != nil {
+				httpx.WriteError(w, 502, "IAL_ERROR", err.Error(), nil)
+				return
+			}
+			project := store.Project{
+				ProjectID:   "prj_" + uuid.NewString(),
+				OrgID:       org.OrgID,
+				PrincipalID: principal.PrincipalID,
+				Name:        projectName,
+			}
+			if err := st.CreateProject(r.Context(), project); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			agent, creds, err := ial.CreateAgent(project.PrincipalID, agentName, req.Scopes)
+			if err != nil {
+				httpx.WriteError(w, 502, "IAL_ERROR", err.Error(), nil)
+				return
+			}
+			credential := store.Credential{
+				CredentialID: "cred_" + uuid.NewString(),
+				ProjectID:    project.ProjectID,
+				PrincipalID:  project.PrincipalID,
+				ActorID:      agent.ActorID,
+				TokenHash:    store.HashToken(creds.Token),
+				Scopes:       req.Scopes,
+				Status:       "ACTIVE",
+			}
+			if err := st.CreateCredential(r.Context(), credential); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			provision := store.SignupProvision{
+				SessionID:    sess.SessionID,
+				OrgID:        org.OrgID,
+				ProjectID:    project.ProjectID,
+				PrincipalID:  project.PrincipalID,
+				ActorID:      agent.ActorID,
+				CredentialID: credential.CredentialID,
+			}
+			if err := st.CreateSignupProvision(r.Context(), provision); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+			if err := st.MarkSignupSessionCompleted(r.Context(), sess.SessionID, time.Now().UTC()); err != nil {
+				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
+				return
+			}
+
+			auditPayload, _ := json.Marshal(map[string]any{
+				"session_id":    sess.SessionID,
+				"org_id":        org.OrgID,
+				"project_id":    project.ProjectID,
+				"principal_id":  project.PrincipalID,
+				"actor_id":      agent.ActorID,
+				"credential_id": credential.CredentialID,
+			})
+			_ = st.RecordAuditEvent(r.Context(), org.OrgID, project.ProjectID, agent.ActorID, "SIGNUP_COMPLETED", auditPayload)
+
+			httpx.WriteJSON(w, 201, map[string]any{
+				"request_id": httpx.NewRequestID(),
+				"status":     "COMPLETED",
+				"owner":      owner,
+				"org":        org,
+				"project":    project,
+				"agent": map[string]any{
+					"actor_id":     agent.ActorID,
+					"principal_id": agent.PrincipalID,
+					"name":         agentName,
+					"scopes":       req.Scopes,
+				},
+				"credential": map[string]any{
+					"credential_id": credential.CredentialID,
+					"status":        credential.Status,
+					"token":         creds.Token,
+					"token_hint":    "store once; not retrievable again",
+				},
+			})
+		})
+	})
+
 	http.ListenAndServe(":"+port, r)
 }
 
@@ -265,4 +610,201 @@ func handleIdempotentMutation(r *http.Request, w http.ResponseWriter, st *store.
 	}
 	httpx.WriteJSON(w, status, body)
 	return true
+}
+
+func envIntDefault(key string, def int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return def
+	}
+	if v <= 0 {
+		return def
+	}
+	return v
+}
+
+func randomVerificationCode() string {
+	// 6-digit numeric OTP derived from secure random bytes.
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "000000"
+	}
+	n := int(b[0])<<24 | int(b[1])<<16 | int(b[2])<<8 | int(b[3])
+	if n < 0 {
+		n = -n
+	}
+	return fmt.Sprintf("%06d", n%1000000)
+}
+
+func maskEmail(email string) string {
+	e := strings.TrimSpace(strings.ToLower(email))
+	parts := strings.Split(e, "@")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "***"
+	}
+	local := parts[0]
+	domain := parts[1]
+	if len(local) <= 2 {
+		return local[:1] + "***@" + domain
+	}
+	return local[:2] + "***@" + domain
+}
+
+type publicSignupConfig struct {
+	ChallengeToken          string
+	StartIPRatePerMinute    int
+	StartEmailRatePerHour   int
+	VerifyIPRatePerMinute   int
+	CompleteIPRatePerMinute int
+	AllowedEmailDomains     map[string]struct{}
+	DeniedEmailDomains      map[string]struct{}
+}
+
+func loadPublicSignupConfig() publicSignupConfig {
+	return publicSignupConfig{
+		ChallengeToken:          strings.TrimSpace(os.Getenv("ONBOARDING_PUBLIC_SIGNUP_CHALLENGE_TOKEN")),
+		StartIPRatePerMinute:    envIntDefault("ONBOARDING_PUBLIC_SIGNUP_START_IP_RATE_PER_MINUTE", 20),
+		StartEmailRatePerHour:   envIntDefault("ONBOARDING_PUBLIC_SIGNUP_START_EMAIL_RATE_PER_HOUR", 5),
+		VerifyIPRatePerMinute:   envIntDefault("ONBOARDING_PUBLIC_SIGNUP_VERIFY_IP_RATE_PER_MINUTE", 60),
+		CompleteIPRatePerMinute: envIntDefault("ONBOARDING_PUBLIC_SIGNUP_COMPLETE_IP_RATE_PER_MINUTE", 10),
+		AllowedEmailDomains:     csvSet(strings.TrimSpace(os.Getenv("ONBOARDING_PUBLIC_SIGNUP_ALLOWED_EMAIL_DOMAINS"))),
+		DeniedEmailDomains:      csvSet(strings.TrimSpace(os.Getenv("ONBOARDING_PUBLIC_SIGNUP_DENIED_EMAIL_DOMAINS"))),
+	}
+}
+
+func csvSet(raw string) map[string]struct{} {
+	out := map[string]struct{}{}
+	if strings.TrimSpace(raw) == "" {
+		return out
+	}
+	for _, part := range strings.Split(raw, ",") {
+		v := strings.ToLower(strings.TrimSpace(part))
+		if v == "" {
+			continue
+		}
+		out[v] = struct{}{}
+	}
+	return out
+}
+
+func isSaneEmail(email string) bool {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(email)), "@")
+	if len(parts) != 2 {
+		return false
+	}
+	local := strings.TrimSpace(parts[0])
+	domain := strings.TrimSpace(parts[1])
+	return local != "" && domain != "" && strings.Contains(domain, ".")
+}
+
+func isAllowedSignupEmail(email string, cfg publicSignupConfig) bool {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(email)), "@")
+	if len(parts) != 2 {
+		return false
+	}
+	domain := strings.TrimSpace(parts[1])
+	if domain == "" {
+		return false
+	}
+	if len(cfg.AllowedEmailDomains) > 0 {
+		if _, ok := cfg.AllowedEmailDomains[domain]; !ok {
+			return false
+		}
+	}
+	if _, blocked := cfg.DeniedEmailDomains[domain]; blocked {
+		return false
+	}
+	return true
+}
+
+func enforceSignupChallenge(w http.ResponseWriter, r *http.Request, cfg publicSignupConfig) bool {
+	if cfg.ChallengeToken == "" {
+		return true
+	}
+	token := strings.TrimSpace(r.Header.Get("X-Signup-Challenge"))
+	if token == "" || token != cfg.ChallengeToken {
+		httpx.WriteError(w, 401, "CHALLENGE_REQUIRED", "signup challenge token required", nil)
+		return false
+	}
+	return true
+}
+
+type fixedWindowLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	window time.Duration
+	byKey  map[string]windowState
+}
+
+type windowState struct {
+	start time.Time
+	count int
+}
+
+func newFixedWindowLimiter(limit int, window time.Duration) *fixedWindowLimiter {
+	return &fixedWindowLimiter{
+		limit:  limit,
+		window: window,
+		byKey:  map[string]windowState{},
+	}
+}
+
+func enforceRateLimit(w http.ResponseWriter, limiter *fixedWindowLimiter, key string) bool {
+	if limiter == nil || limiter.limit <= 0 {
+		return true
+	}
+	if limiter.Allow(strings.TrimSpace(key), time.Now().UTC()) {
+		return true
+	}
+	httpx.WriteError(w, 429, "RATE_LIMITED", "rate limit exceeded", nil)
+	return false
+}
+
+func (l *fixedWindowLimiter) Allow(key string, now time.Time) bool {
+	if l == nil || l.limit <= 0 {
+		return true
+	}
+	if key == "" {
+		key = "anonymous"
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	cur := l.byKey[key]
+	if cur.start.IsZero() || now.Sub(cur.start) >= l.window {
+		l.byKey[key] = windowState{start: now, count: 1}
+		return true
+	}
+	if cur.count >= l.limit {
+		return false
+	}
+	cur.count++
+	l.byKey[key] = cur
+	return true
+}
+
+func clientIPFromRequest(r *http.Request) string {
+	if r == nil {
+		return "unknown"
+	}
+	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+		parts := strings.Split(xff, ",")
+		if len(parts) > 0 {
+			v := strings.TrimSpace(parts[0])
+			if v != "" {
+				return v
+			}
+		}
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+	if strings.TrimSpace(r.RemoteAddr) == "" {
+		return "unknown"
+	}
+	return strings.TrimSpace(r.RemoteAddr)
 }

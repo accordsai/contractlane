@@ -77,7 +77,7 @@ onboarding-migrate:
 	docker compose -f docker-compose.onboarding.yml run --rm onboarding-migrate
 
 onboarding-smoke:
-	bash scripts/smoke_onboarding.sh
+	set -a; [ -f .env ] && . ./.env; set +a; bash scripts/smoke_onboarding.sh
 
 onboarding-down:
 	docker compose -f docker-compose.onboarding.yml down
@@ -86,7 +86,7 @@ test:
 	go test ./... -count=1
 
 smoke:
-	bash scripts/smoke.sh
+	set -a; [ -f .env ] && . ./.env; set +a; bash scripts/smoke.sh
 
 sdk-python-venv:
 	test -x $(PY_SDK_PYTHON) || python3 -m venv $(PY_SDK_VENV)

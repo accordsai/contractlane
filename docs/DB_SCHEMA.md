@@ -88,3 +88,5 @@ Primary tables:
 - `onboarding_credentials` (stores hashed issued tokens + actor linkage)
 - `onboarding_idempotency_records`
 - `onboarding_audit_events`
+- `onboarding_signup_sessions` (phase A public signup sessions + verification status)
+- `onboarding_signup_provisions` (phase C session -> org/project/principal/actor/credential linkage)

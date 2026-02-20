@@ -1,0 +1,3 @@
+DROP INDEX IF EXISTS onboarding_signup_sessions_status_expires_idx;
+DROP INDEX IF EXISTS onboarding_signup_sessions_email_created_idx;
+DROP TABLE IF EXISTS onboarding_signup_sessions;
