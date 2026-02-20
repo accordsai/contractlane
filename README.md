@@ -24,7 +24,9 @@ NOTE: to make this production safe you will need some kind of SSL termination, o
 ## Specs
 
 - `OPENCLAW.md`
+- `docs/HOSTED_AGENT_JOURNEY.md` (hosted/public primary path)
 - `docs/INTEGRATOR_START_HERE.md`
+- `docs/TEMPLATE_MODEL.md`
 - `docs/PROTOCOL.md`
 - `docs/SIG_V1.md`
 - `docs/AGENT_ID_V1.md`

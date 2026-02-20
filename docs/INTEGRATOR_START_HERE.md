@@ -2,13 +2,25 @@
 
 This is the canonical onboarding page for external agent integrators.
 
+## Choose Your Path
+
+Most users should start here:
+
+- Hosted/public deployment: `docs/HOSTED_AGENT_JOURNEY.md`
+
+If you are running your own infrastructure:
+
+- Self-hosted/operator path: continue below and see `docs/ONBOARDING_SERVICE.md`
+
 ## Read In This Order
 
 1. `docs/PROTOCOL.md` (authoritative identifiers and compatibility rule)
 2. `docs/API_SPEC.md` (locked route surface)
-3. `docs/SIG_V1.md` and `docs/AGENT_ID_V1.md`
-4. `docs/EVIDENCE_V1.md` and `docs/PROOF_BUNDLE_V1.md`
-5. `docs/CONFORMANCE.md`
+3. `docs/HOSTED_AGENT_JOURNEY.md` (hosted end-to-end flow)
+4. `docs/TEMPLATE_MODEL.md` (template scope: deployment/principal/actor/contract)
+5. `docs/SIG_V1.md` and `docs/AGENT_ID_V1.md`
+6. `docs/EVIDENCE_V1.md` and `docs/PROOF_BUNDLE_V1.md`
+7. `docs/CONFORMANCE.md`
 
 ## Non-Negotiable v1 Rules
 
@@ -19,6 +31,10 @@ This is the canonical onboarding page for external agent integrators.
   - `proof_id = sha256_hex(canonical_json(proof))`
 
 ## Minimum Endpoints Most Integrators Use
+
+Hosted/public canonical flow:
+
+- `docs/HOSTED_AGENT_JOURNEY.md`
 
 - `POST /cel/contracts`
 - `POST /cel/contracts/{contract_id}/variables:bulkSet`

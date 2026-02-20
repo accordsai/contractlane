@@ -2,6 +2,10 @@
 
 This guide is practical integration guidance for agents consuming Contract Lane Protocol v1.
 
+Hosted/public first path:
+
+- `docs/HOSTED_AGENT_JOURNEY.md`
+
 ## Minimum Implementation
 
 An integrating agent should implement:
@@ -48,8 +52,8 @@ Go:
 ```go
 resp, err := client.CreateContract(ctx, contractlane.CreateContractRequest{
   ActorContext: contractlane.ActorContext{
-    PrincipalID: "prn_123",
-    ActorID:     "act_123",
+    PrincipalID: "11111111-1111-1111-1111-111111111111",
+    ActorID:     "22222222-2222-2222-2222-222222222222",
     ActorType:   "AGENT",
   },
   TemplateID: "tpl_terms_v1",
@@ -65,7 +69,7 @@ Python:
 
 ```python
 resp = client.create_contract(
-    actor_context={"principal_id": "prn_123", "actor_id": "act_123", "actor_type": "AGENT"},
+    actor_context={"principal_id": "11111111-1111-1111-1111-111111111111", "actor_id": "22222222-2222-2222-2222-222222222222", "actor_type": "AGENT"},
     template_id="tpl_terms_v1",
     counterparty={"name": "Buyer", "email": "buyer@example.com"},
     initial_variables={"price": "10"},
@@ -76,7 +80,7 @@ TypeScript:
 
 ```ts
 const resp = await client.createContract({
-  actor_context: { principal_id: "prn_123", actor_id: "act_123", actor_type: "AGENT" },
+  actor_context: { principal_id: "11111111-1111-1111-1111-111111111111", actor_id: "22222222-2222-2222-2222-222222222222", actor_type: "AGENT" },
   template_id: "tpl_terms_v1",
   counterparty: { name: "Buyer", email: "buyer@example.com" },
   initial_variables: { price: "10" },
@@ -90,6 +94,8 @@ const resp = await client.createContract({
 3. Execute action(s); respond to approval requests when needed.
 4. Fetch evidence/proof artifacts.
 5. Verify artifacts offline before trusting final state.
+
+For the exact hosted request/response chain, see `docs/HOSTED_AGENT_JOURNEY.md`.
 
 ## Security Notes
 
@@ -119,6 +125,7 @@ env := signature.EnvelopeV1{
 ## See Also
 
 - `docs/INTEGRATOR_START_HERE.md`
+- `docs/TEMPLATE_MODEL.md`
 - `docs/API_SPEC.md`
 - `docs/PROTOCOL.md`
 - `docs/CONFORMANCE.md`

@@ -2,6 +2,8 @@
 
 This quickstart is the shortest practical path for an agent integrator.
 
+For hosted/public deployments, use `docs/HOSTED_AGENT_JOURNEY.md` as the primary entrypoint.
+
 ## Prerequisites
 
 - A running Contract Lane node.
@@ -63,6 +65,10 @@ For proof bundle:
 - Verify evidence with EVP.
 - Verify proof/proof-bundle with SDK verifier helpers.
 
+For exact hosted request/response examples (signup -> template -> contract -> action/approval -> proof verify), use:
+
+- `docs/HOSTED_AGENT_JOURNEY.md`
+
 ## Optional Hosted Commerce
 
 - `POST /commerce/intents` (context `commerce-intent`)
@@ -77,3 +83,5 @@ The following identifiers are intentionally different by surface:
 - Proof bundle: `protocol="contract-lane"`, version `1`
 
 Use `docs/PROTOCOL.md` as the authoritative source.
+
+Template scope and policy layering are documented in `docs/TEMPLATE_MODEL.md`.
