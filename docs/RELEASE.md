@@ -17,8 +17,8 @@ SDK publish notes:
    - module path: `github.com/accordsai/contractlane/sdk/go/contractlane`
    - module tag format: `sdk/go/contractlane/vX.Y.Z`
    - example:
-     - `git tag -a sdk/go/contractlane/v1.0.0 -m "Go SDK v1.0.0"`
-     - `git push origin sdk/go/contractlane/v1.0.0`
+     - `git tag -a sdk/go/contractlane/v1.0.1 -m "Go SDK v1.0.1"`
+     - `git push origin sdk/go/contractlane/v1.0.1`
 2. Python SDK:
    - package: `contractlane` (PyPI)
    - version source: `sdk/python/pyproject.toml` (`[project].version`)

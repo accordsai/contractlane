@@ -16,7 +16,7 @@ BASE_URL=http://localhost:8082 ./conformance/runner/run_local_conformance.sh
 Go:
 
 ```bash
-go get github.com/accordsai/contractlane/sdk/go/contractlane@v1.0.0
+go get github.com/accordsai/contractlane/sdk/go/contractlane@v1.0.1
 ```
 
 Python:
