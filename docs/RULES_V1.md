@@ -185,6 +185,10 @@ Recommended approach:
 2. Use `rules-v1` for deal-specific conditions (settlement, authorization, transition permission).
 3. Verify proof/evidence offline using SDK verification helpers.
 
+Hosted deployment note:
+- Rules used for CEL transition validation are typically operator-managed policy input.
+- End-client integrators should treat rules as verification constraints visible in returned proof/evidence, not as template edits.
+
 Related docs:
 - `docs/TEMPLATE_MODEL.md`
 - `docs/DELEGATION_V1.md`

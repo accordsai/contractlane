@@ -17,18 +17,34 @@ type hostedModeConfig struct {
 	EnableHostedCommerce                      bool
 	EnableProofExport                         bool
 	EnableProofBundleExport                   bool
+	EnableTemplateAdminAPI                    bool
 	EnableServerDerivedSettlementAttestations bool
+	TemplateAdminBootstrapToken               string
+	TemplateAdminAuthMode                     string
+	TemplateAdminRequiredScope                string
 	HostedMaxBodyBytes                        int64
 	HostedRateLimitPerMinute                  int
 	ProofRateLimitPerMinute                   int
 }
 
 func loadHostedModeConfig() hostedModeConfig {
+	adminMode := strings.ToLower(strings.TrimSpace(os.Getenv("TEMPLATE_ADMIN_AUTH_MODE")))
+	if adminMode == "" {
+		adminMode = "bootstrap"
+	}
+	adminScope := strings.TrimSpace(os.Getenv("TEMPLATE_ADMIN_REQUIRED_SCOPE"))
+	if adminScope == "" {
+		adminScope = "cel.admin:templates"
+	}
 	return hostedModeConfig{
 		EnableHostedCommerce:                      envBoolDefault("ENABLE_HOSTED_COMMERCE", true),
 		EnableProofExport:                         envBoolDefault("ENABLE_PROOF_EXPORT", true),
 		EnableProofBundleExport:                   envBoolDefault("ENABLE_PROOF_BUNDLE_EXPORT", true),
+		EnableTemplateAdminAPI:                    envBoolDefault("ENABLE_TEMPLATE_ADMIN_API", false),
 		EnableServerDerivedSettlementAttestations: envBoolDefault("ENABLE_SERVER_DERIVED_SETTLEMENT_ATTESTATIONS", false),
+		TemplateAdminBootstrapToken:               strings.TrimSpace(os.Getenv("TEMPLATE_ADMIN_BOOTSTRAP_TOKEN")),
+		TemplateAdminAuthMode:                     adminMode,
+		TemplateAdminRequiredScope:                adminScope,
 		HostedMaxBodyBytes:                        envInt64Default("HOSTED_MAX_BODY_BYTES", 262144),
 		HostedRateLimitPerMinute:                  envIntDefault("HOSTED_RATE_LIMIT_PER_MINUTE", 0),
 		ProofRateLimitPerMinute:                   envIntDefault("PROOF_RATE_LIMIT_PER_MINUTE", 0),

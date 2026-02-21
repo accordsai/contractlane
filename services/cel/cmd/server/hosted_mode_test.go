@@ -13,6 +13,30 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+func TestLoadHostedModeConfig_TemplateAdminAuthDefaults(t *testing.T) {
+	t.Setenv("TEMPLATE_ADMIN_AUTH_MODE", "")
+	t.Setenv("TEMPLATE_ADMIN_REQUIRED_SCOPE", "")
+	cfg := loadHostedModeConfig()
+	if cfg.TemplateAdminAuthMode != "bootstrap" {
+		t.Fatalf("expected default TEMPLATE_ADMIN_AUTH_MODE=bootstrap, got %q", cfg.TemplateAdminAuthMode)
+	}
+	if cfg.TemplateAdminRequiredScope != "cel.admin:templates" {
+		t.Fatalf("expected default TEMPLATE_ADMIN_REQUIRED_SCOPE=cel.admin:templates, got %q", cfg.TemplateAdminRequiredScope)
+	}
+}
+
+func TestLoadHostedModeConfig_TemplateAdminAuthConfigured(t *testing.T) {
+	t.Setenv("TEMPLATE_ADMIN_AUTH_MODE", "agent_scope")
+	t.Setenv("TEMPLATE_ADMIN_REQUIRED_SCOPE", "cel.contracts:write")
+	cfg := loadHostedModeConfig()
+	if cfg.TemplateAdminAuthMode != "agent_scope" {
+		t.Fatalf("expected configured TEMPLATE_ADMIN_AUTH_MODE, got %q", cfg.TemplateAdminAuthMode)
+	}
+	if cfg.TemplateAdminRequiredScope != "cel.contracts:write" {
+		t.Fatalf("expected configured TEMPLATE_ADMIN_REQUIRED_SCOPE, got %q", cfg.TemplateAdminRequiredScope)
+	}
+}
+
 func TestBuildCapabilitiesResponseReflectsFlags(t *testing.T) {
 	cfg := hostedModeConfig{
 		EnableHostedCommerce:                      false,

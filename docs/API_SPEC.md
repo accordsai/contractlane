@@ -17,6 +17,16 @@
 - GET  /cel/templates
 - POST /cel/principals/{principal_id}/templates/{template_id}/enable
 - GET  /cel/templates/{template_id}/governance
+- POST /cel/admin/templates
+- PUT  /cel/admin/templates/{template_id}
+- POST /cel/admin/templates/{template_id}:publish
+- POST /cel/admin/templates/{template_id}:archive
+- POST /cel/admin/templates/{template_id}:clone
+- GET  /cel/admin/templates/{template_id}/shares
+- POST /cel/admin/templates/{template_id}/shares
+- DELETE /cel/admin/templates/{template_id}/shares/{principal_id}
+- GET  /cel/admin/templates/{template_id}
+- GET  /cel/admin/templates
 - POST /cel/contracts
 - GET  /cel/contracts/{contract_id}
 - GET  /cel/contracts
@@ -109,6 +119,37 @@ Routing is configured via `webhook_endpoints` records scoped by `(provider, endp
 Onboarding/public-signup routes are control-plane endpoints and may be operator-specific; they are not currently required protocol discovery fields in the CEL well-known response.
 
 Operational toggles and hosted-mode error handling are documented in `docs/hosted_mode.md`.
+
+## Template Admin Authoring
+
+Admin authoring endpoints are additive and operator-oriented:
+
+- `POST /cel/admin/templates`
+- `PUT /cel/admin/templates/{template_id}`
+- `POST /cel/admin/templates/{template_id}:publish`
+- `POST /cel/admin/templates/{template_id}:archive`
+- `POST /cel/admin/templates/{template_id}:clone`
+- `GET /cel/admin/templates/{template_id}/shares`
+- `POST /cel/admin/templates/{template_id}/shares`
+- `DELETE /cel/admin/templates/{template_id}/shares/{principal_id}`
+- `GET /cel/admin/templates/{template_id}`
+- `GET /cel/admin/templates?...filters`
+
+Security requirements:
+
+- Disabled by default (`ENABLE_TEMPLATE_ADMIN_API=false`).
+- Admin auth modes:
+  - `bootstrap` (default) via `TEMPLATE_ADMIN_BOOTSTRAP_TOKEN`
+  - `agent_scope` via agent bearer + `TEMPLATE_ADMIN_REQUIRED_SCOPE` (default `cel.admin:templates`)
+- Mutating endpoints require `Idempotency-Key`.
+- Publish runs strict lint checks and returns `422 TEMPLATE_LINT_FAILED` with deterministic `error.details[]` when validation fails.
+- Clone creates a new `DRAFT` template by copying template/governance/variables from source.
+- Share endpoints add/remove explicit principal grants for `PRIVATE` templates.
+- Lint/error catalog: `docs/TEMPLATE_LINT_ERRORS.md`.
+
+Runtime compatibility behavior:
+
+- Contract creation/use only accepts templates in `PUBLISHED` status.
 
 ## Stripe Webhook Setup (Execution)
 

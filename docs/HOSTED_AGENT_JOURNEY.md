@@ -48,6 +48,7 @@ Select template based on:
 - action gates (`FORCE_HUMAN`, `ALLOW_AUTOMATION`, `DEFER`)
 
 See `docs/TEMPLATE_MODEL.md` for template scope.
+If you operate templates yourself, see `docs/TEMPLATE_AUTHORING.md` and lint/error catalog `docs/TEMPLATE_LINT_ERRORS.md`.
 
 ## 3) Create Contract
 
@@ -114,6 +115,10 @@ What agents should do:
 References:
 - `docs/RULES_V1.md`
 - `docs/TEMPLATE_MODEL.md`
+
+Practical split:
+- Use templates to define reusable structure/governance.
+- Use rules for per-contract validation requirements (for example settlement status/amount requirements).
 
 ## 6) Execute Action and Decide Approval (sig-v1)
 

@@ -55,3 +55,10 @@ Transport protections:
 - `HOSTED_MAX_BODY_BYTES` (default `262144`)
 - `HOSTED_RATE_LIMIT_PER_MINUTE` (default `0`, disabled)
 - `PROOF_RATE_LIMIT_PER_MINUTE` (default `0`, disabled)
+
+Template admin (operator path):
+
+- `ENABLE_TEMPLATE_ADMIN_API` (default `false`)
+- `TEMPLATE_ADMIN_AUTH_MODE` (`bootstrap` default, or `agent_scope`)
+- `TEMPLATE_ADMIN_BOOTSTRAP_TOKEN` (required for `bootstrap` mode)
+- `TEMPLATE_ADMIN_REQUIRED_SCOPE` (default `cel.admin:templates`, used in `agent_scope` mode)

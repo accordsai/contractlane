@@ -45,6 +45,20 @@ Optional hosted commerce endpoints:
 - `POST /commerce/intents`
 - `POST /commerce/accepts`
 
+## Template Selection vs Template Authoring
+
+For most agents on hosted/public deployments:
+
+- Select existing published templates:
+  - `GET /cel/templates`
+  - `GET /cel/templates/{template_id}/governance`
+- Then create contract from selected `template_id`.
+
+Template creation/edit/publish is an operator/admin workflow (not a standard end-client flow):
+
+- `docs/TEMPLATE_AUTHORING.md`
+- `docs/TEMPLATE_LINT_ERRORS.md` (deterministic `422 TEMPLATE_LINT_FAILED` catalog)
+
 ## SDK Contract Creation Snippets
 
 Go:
@@ -94,6 +108,8 @@ const resp = await client.createContract({
 3. Execute action(s); respond to approval requests when needed.
 4. Fetch evidence/proof artifacts.
 5. Verify artifacts offline before trusting final state.
+
+If your integration requires per-contract payment/authorization conditions, see `docs/RULES_V1.md` and coordinate operator policy input in hosted mode.
 
 For the exact hosted request/response chain, see `docs/HOSTED_AGENT_JOURNEY.md`.
 

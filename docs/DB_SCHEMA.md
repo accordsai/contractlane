@@ -2,6 +2,22 @@
 
 The canonical schema is migration-driven under `migrations/`.
 
+## Template Authoring
+
+Migration `000020_template_authoring_admin` adds additive template authoring metadata:
+
+- template lifecycle/status (`DRAFT`, `PUBLISHED`, `ARCHIVED`)
+- template visibility (`GLOBAL`, `PRIVATE`)
+- template ownership (`owner_principal_id`)
+- template versioning/publish fields (`template_version`, `published_at`, `published_by`)
+- metadata JSON for operator tier/labels
+
+It also adds admin support tables:
+
+- `template_admin_idempotency` (idempotent replay for mutating template admin endpoints)
+- `template_admin_audit_events` (structured audit trail for create/update/publish/archive)
+- `template_shares` (explicit principal grants for private template access)
+
 ## Webhook Receipts
 
 - `webhook_receipts` (introduced in migration `000012_webhook_receipts`) is the legacy receipt table.

@@ -53,8 +53,38 @@ Typical flow:
 3. (Optional) enable for principal (`POST /cel/principals/{principal_id}/templates/{template_id}/enable`).
 4. Create contract with selected `template_id` (`POST /cel/contracts`).
 
+## Authoring Lifecycle (Admin Path)
+
+Template authoring is an operator/admin workflow:
+
+- Create draft: `POST /cel/admin/templates`
+- Update draft/active definition: `PUT /cel/admin/templates/{template_id}`
+- Publish: `POST /cel/admin/templates/{template_id}:publish`
+- Archive: `POST /cel/admin/templates/{template_id}:archive`
+- Clone: `POST /cel/admin/templates/{template_id}:clone`
+- Share grants: `GET|POST|DELETE /cel/admin/templates/{template_id}/shares...`
+- Inspect/list: `GET /cel/admin/templates/{template_id}`, `GET /cel/admin/templates?...`
+
+Template status:
+- `DRAFT`
+- `PUBLISHED`
+- `ARCHIVED`
+
+Only `PUBLISHED` templates are valid for contract creation/use.
+
+## Visibility
+
+Template visibility values:
+- `GLOBAL`: deployment-wide (subject to principal enable rules where applicable)
+- `PRIVATE`: owned by one principal (`owner_principal_id`)
+
+`PRIVATE` templates:
+- owner principal can enable/use
+- non-owner principal cannot enable/use unless explicitly shared by admin grant
+
 ## Important Notes
 
 - In this implementation, template authoring is operator/admin-oriented; agent flows typically consume existing templates.
 - Principal override is template-scoped; it affects future usage of that template by that principal.
 - Variables are contract-scoped values; template variable definitions (`required`, `type`, policies) are not per-contract knobs.
+- Template authoring lint/debug reference: `docs/TEMPLATE_LINT_ERRORS.md`.

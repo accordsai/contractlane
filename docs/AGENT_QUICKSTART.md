@@ -85,3 +85,8 @@ The following identifiers are intentionally different by surface:
 Use `docs/PROTOCOL.md` as the authoritative source.
 
 Template scope and policy layering are documented in `docs/TEMPLATE_MODEL.md`.
+
+If you are an operator adding/editing templates (not typical end-client flow):
+
+- `docs/TEMPLATE_AUTHORING.md`
+- `docs/TEMPLATE_LINT_ERRORS.md`

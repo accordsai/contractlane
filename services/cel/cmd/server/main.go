@@ -266,6 +266,7 @@ func main() {
 		api.Get("/.well-known/contractlane", func(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteJSON(w, 200, buildCapabilitiesResponse(cfg))
 		})
+		registerTemplateAdminRoutes(api, st, pool, cfg)
 
 		// DEV helper to seed a template for smoke tests
 		api.Post("/dev/seed-template", func(w http.ResponseWriter, r *http.Request) {
@@ -284,7 +285,13 @@ func main() {
 		api.Get("/templates", func(w http.ResponseWriter, r *http.Request) {
 			ct := r.URL.Query().Get("contract_type")
 			j := r.URL.Query().Get("jurisdiction")
-			templates, err := st.ListTemplates(r.Context(), ct, j)
+			var principalID *string
+			if authz := strings.TrimSpace(r.Header.Get("Authorization")); authz != "" {
+				if agent, err := authn.AuthenticateAgentBearer(r.Context(), pool, authz); err == nil {
+					principalID = &agent.PrincipalID
+				}
+			}
+			templates, err := st.ListTemplates(r.Context(), ct, j, principalID)
 			if err != nil {
 				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
 				return
@@ -303,6 +310,24 @@ func main() {
 				httpx.WriteError(w, 400, "BAD_JSON", err.Error(), nil)
 				return
 			}
+			tpl, err := st.GetTemplate(r.Context(), templateID)
+			if err != nil {
+				httpx.WriteError(w, 404, "NOT_FOUND", "template not found", nil)
+				return
+			}
+			if strings.EqualFold(tpl.Visibility, "PRIVATE") {
+				ownerOK := tpl.OwnerPrincipalID != nil && strings.TrimSpace(*tpl.OwnerPrincipalID) == principalID
+				sharedOK := false
+				if !ownerOK {
+					if ok, err := st.IsTemplateSharedWithPrincipal(r.Context(), templateID, principalID); err == nil {
+						sharedOK = ok
+					}
+				}
+				if !ownerOK && !sharedOK {
+					httpx.WriteError(w, 403, "FORBIDDEN", "template is private to owner principal", nil)
+					return
+				}
+			}
 			if err := st.EnableTemplate(r.Context(), principalID, templateID, req.EnabledByActorID, req.OverrideGates); err != nil {
 				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)
 				return
@@ -312,6 +337,34 @@ func main() {
 
 		api.Get("/templates/{template_id}/governance", func(w http.ResponseWriter, r *http.Request) {
 			templateID := chi.URLParam(r, "template_id")
+			tpl, err := st.GetTemplate(r.Context(), templateID)
+			if err != nil {
+				httpx.WriteError(w, 404, "NOT_FOUND", "template not found", nil)
+				return
+			}
+			if strings.EqualFold(strings.TrimSpace(tpl.Visibility), "PRIVATE") {
+				authz := strings.TrimSpace(r.Header.Get("Authorization"))
+				if authz == "" {
+					httpx.WriteError(w, 404, "NOT_FOUND", "template not found", nil)
+					return
+				}
+				agent, err := authn.AuthenticateAgentBearer(r.Context(), pool, authz)
+				if err != nil {
+					httpx.WriteError(w, 404, "NOT_FOUND", "template not found", nil)
+					return
+				}
+				ownerOK := tpl.OwnerPrincipalID != nil && strings.TrimSpace(*tpl.OwnerPrincipalID) == agent.PrincipalID
+				sharedOK := false
+				if !ownerOK {
+					if ok, err := st.IsTemplateSharedWithPrincipal(r.Context(), templateID, agent.PrincipalID); err == nil {
+						sharedOK = ok
+					}
+				}
+				if !ownerOK && !sharedOK {
+					httpx.WriteError(w, 404, "NOT_FOUND", "template not found", nil)
+					return
+				}
+			}
 			gates, err := st.GetTemplateGates(r.Context(), templateID)
 			if err != nil {
 				httpx.WriteError(w, 404, "NOT_FOUND", err.Error(), nil)
@@ -339,7 +392,7 @@ func main() {
 				httpx.WriteError(w, 401, "UNAUTHORIZED", "agent authentication required", nil)
 				return
 			}
-			if _, err := st.GetTemplate(r.Context(), templateID); err != nil {
+			if _, err := st.GetTemplateForPrincipalUse(r.Context(), agent.PrincipalID, templateID); err != nil {
 				httpx.WriteError(w, 404, "NOT_FOUND", "template not found", nil)
 				return
 			}
@@ -1284,11 +1337,16 @@ func main() {
 			if replayed := replayIdempotentResponse(r.Context(), st, w, req.ActorContext, "POST /cel/contracts"); replayed {
 				return
 			}
+			tpl, err := st.GetTemplateForPrincipalUse(r.Context(), req.ActorContext.PrincipalID, req.TemplateID)
+			if err != nil {
+				httpx.WriteError(w, 404, "NOT_FOUND", "template not found", nil)
+				return
+			}
 			c := store.Contract{
 				ContractID:        "ctr_" + uuid.NewString(),
 				PrincipalID:       req.ActorContext.PrincipalID,
 				TemplateID:        req.TemplateID,
-				TemplateVersion:   ptr(parseTemplateVersion(req.TemplateID)),
+				TemplateVersion:   ptr(strings.TrimSpace(tpl.TemplateVersion)),
 				SubjectActorID:    ptr(req.ActorContext.ActorID),
 				State:             "DRAFT_CREATED",
 				RiskLevel:         "LOW",
@@ -1296,6 +1354,9 @@ func main() {
 				CounterpartyEmail: req.Counterparty.Email,
 				CreatedBy:         req.ActorContext.ActorID,
 				CreatedAt:         time.Now(),
+			}
+			if strings.TrimSpace(*c.TemplateVersion) == "" {
+				c.TemplateVersion = ptr(parseTemplateVersion(req.TemplateID))
 			}
 			if err := st.CreateContract(r.Context(), c); err != nil {
 				httpx.WriteError(w, 500, "DB_ERROR", err.Error(), nil)

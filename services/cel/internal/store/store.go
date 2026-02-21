@@ -37,11 +37,20 @@ func (s *Store) AcquireGateResolveLock(ctx context.Context, principalID, gateKey
 }
 
 type Template struct {
-	TemplateID   string `json:"template_id"`
-	ContractType string `json:"contract_type"`
-	Jurisdiction string `json:"jurisdiction"`
-	DisplayName  string `json:"display_name"`
-	RiskTier     string `json:"risk_tier"`
+	TemplateID       string         `json:"template_id"`
+	TemplateVersion  string         `json:"template_version,omitempty"`
+	ContractType     string         `json:"contract_type"`
+	Jurisdiction     string         `json:"jurisdiction"`
+	DisplayName      string         `json:"display_name"`
+	RiskTier         string         `json:"risk_tier"`
+	Status           string         `json:"status,omitempty"`
+	Visibility       string         `json:"visibility,omitempty"`
+	OwnerPrincipalID *string        `json:"owner_principal_id,omitempty"`
+	Metadata         map[string]any `json:"metadata,omitempty"`
+	PublishedAt      *time.Time     `json:"published_at,omitempty"`
+	PublishedBy      *string        `json:"published_by,omitempty"`
+	ArchivedAt       *time.Time     `json:"archived_at,omitempty"`
+	ArchivedBy       *string        `json:"archived_by,omitempty"`
 }
 
 type TemplateVar struct {
@@ -61,8 +70,8 @@ func (s *Store) UpsertSeedTemplate(ctx context.Context) (string, error) {
 	}
 	defer tx.Rollback(ctx)
 
-	_, _ = tx.Exec(ctx, `INSERT INTO templates(template_id,contract_type,jurisdiction,display_name,risk_tier)
-VALUES($1,'NDA','US','NDA (US) v1','LOW')
+	_, _ = tx.Exec(ctx, `INSERT INTO templates(template_id,template_version,contract_type,jurisdiction,display_name,risk_tier,status,visibility,published_at)
+VALUES($1,'v1','NDA','US','NDA (US) v1','LOW','PUBLISHED','GLOBAL',now())
 ON CONFLICT (template_id) DO NOTHING`, tplID)
 
 	_, _ = tx.Exec(ctx, `INSERT INTO template_governance(template_id,template_gates,protected_slots,prohibited_slots)
@@ -88,9 +97,33 @@ ON CONFLICT (template_id,var_key) DO UPDATE SET
 	return tplID, nil
 }
 
-func (s *Store) ListTemplates(ctx context.Context, contractType, jurisdiction string) ([]Template, error) {
-	rows, err := s.DB.Query(ctx, `SELECT template_id,contract_type,jurisdiction,display_name,risk_tier FROM templates WHERE contract_type=$1 AND jurisdiction=$2`,
-		contractType, jurisdiction)
+func (s *Store) ListTemplates(ctx context.Context, contractType, jurisdiction string, principalID *string) ([]Template, error) {
+	var pID string
+	if principalID != nil {
+		pID = strings.TrimSpace(*principalID)
+	}
+	rows, err := s.DB.Query(ctx, `
+SELECT template_id,template_version,contract_type,jurisdiction,display_name,risk_tier,status,visibility,owner_principal_id,metadata,published_at,published_by,archived_at,archived_by
+FROM templates
+WHERE status='PUBLISHED'
+  AND (
+    visibility='GLOBAL'
+    OR (
+      visibility='PRIVATE'
+      AND (
+        owner_principal_id=$3
+        OR EXISTS (
+          SELECT 1 FROM template_shares ts
+          WHERE ts.template_id=templates.template_id
+            AND ts.principal_id=$3
+        )
+      )
+    )
+  )
+  AND ($1='' OR contract_type=$1)
+  AND ($2='' OR jurisdiction=$2)
+ORDER BY template_id ASC
+`, contractType, jurisdiction, pID)
 	if err != nil {
 		return nil, err
 	}
@@ -98,9 +131,15 @@ func (s *Store) ListTemplates(ctx context.Context, contractType, jurisdiction st
 	var out []Template
 	for rows.Next() {
 		var t Template
-		if err := rows.Scan(&t.TemplateID, &t.ContractType, &t.Jurisdiction, &t.DisplayName, &t.RiskTier); err != nil {
+		var metadataBytes []byte
+		if err := rows.Scan(
+			&t.TemplateID, &t.TemplateVersion, &t.ContractType, &t.Jurisdiction, &t.DisplayName, &t.RiskTier,
+			&t.Status, &t.Visibility, &t.OwnerPrincipalID, &metadataBytes,
+			&t.PublishedAt, &t.PublishedBy, &t.ArchivedAt, &t.ArchivedBy,
+		); err != nil {
 			return nil, err
 		}
+		t.Metadata = decodeMetadataJSON(metadataBytes)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -108,12 +147,99 @@ func (s *Store) ListTemplates(ctx context.Context, contractType, jurisdiction st
 
 func (s *Store) GetTemplate(ctx context.Context, templateID string) (Template, error) {
 	var t Template
+	var metadataBytes []byte
 	err := s.DB.QueryRow(ctx, `
-SELECT template_id,contract_type,jurisdiction,display_name,risk_tier
+SELECT template_id,template_version,contract_type,jurisdiction,display_name,risk_tier,status,visibility,owner_principal_id,metadata,published_at,published_by,archived_at,archived_by
 FROM templates
 WHERE template_id=$1
-`, templateID).Scan(&t.TemplateID, &t.ContractType, &t.Jurisdiction, &t.DisplayName, &t.RiskTier)
+`, templateID).Scan(
+		&t.TemplateID, &t.TemplateVersion, &t.ContractType, &t.Jurisdiction, &t.DisplayName, &t.RiskTier,
+		&t.Status, &t.Visibility, &t.OwnerPrincipalID, &metadataBytes,
+		&t.PublishedAt, &t.PublishedBy, &t.ArchivedAt, &t.ArchivedBy,
+	)
+	t.Metadata = decodeMetadataJSON(metadataBytes)
 	return t, err
+}
+
+func (s *Store) GetTemplateForPrincipalUse(ctx context.Context, principalID, templateID string) (Template, error) {
+	var t Template
+	var metadataBytes []byte
+	err := s.DB.QueryRow(ctx, `
+SELECT template_id,template_version,contract_type,jurisdiction,display_name,risk_tier,status,visibility,owner_principal_id,metadata,published_at,published_by,archived_at,archived_by
+FROM templates
+WHERE template_id=$1
+  AND status='PUBLISHED'
+  AND (
+    visibility='GLOBAL'
+    OR (
+      visibility='PRIVATE'
+      AND (
+        owner_principal_id=$2
+        OR EXISTS (
+          SELECT 1 FROM template_shares ts
+          WHERE ts.template_id=templates.template_id
+            AND ts.principal_id=$2
+        )
+      )
+    )
+  )
+`, templateID, principalID).Scan(
+		&t.TemplateID, &t.TemplateVersion, &t.ContractType, &t.Jurisdiction, &t.DisplayName, &t.RiskTier,
+		&t.Status, &t.Visibility, &t.OwnerPrincipalID, &metadataBytes,
+		&t.PublishedAt, &t.PublishedBy, &t.ArchivedAt, &t.ArchivedBy,
+	)
+	t.Metadata = decodeMetadataJSON(metadataBytes)
+	return t, err
+}
+
+func (s *Store) IsTemplateSharedWithPrincipal(ctx context.Context, templateID, principalID string) (bool, error) {
+	var ok bool
+	err := s.DB.QueryRow(ctx, `
+SELECT EXISTS(
+  SELECT 1 FROM template_shares
+  WHERE template_id=$1 AND principal_id=$2
+)
+`, templateID, principalID).Scan(&ok)
+	return ok, err
+}
+
+func (s *Store) ShareTemplateWithPrincipal(ctx context.Context, templateID, principalID, createdBy string) error {
+	_, err := s.DB.Exec(ctx, `
+INSERT INTO template_shares(template_id,principal_id,created_by)
+VALUES($1,$2,$3)
+ON CONFLICT (template_id,principal_id) DO NOTHING
+`, templateID, principalID, createdBy)
+	return err
+}
+
+func (s *Store) UnshareTemplateWithPrincipal(ctx context.Context, templateID, principalID string) error {
+	_, err := s.DB.Exec(ctx, `
+DELETE FROM template_shares
+WHERE template_id=$1 AND principal_id=$2
+`, templateID, principalID)
+	return err
+}
+
+func (s *Store) ListTemplateShares(ctx context.Context, templateID string) ([]string, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT principal_id
+FROM template_shares
+WHERE template_id=$1
+ORDER BY principal_id ASC
+`, templateID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) GetPrincipalPolicyRouting(ctx context.Context, principalID string) (*string, string, error) {
@@ -176,6 +302,9 @@ func (s *Store) GetTemplateVars(ctx context.Context, templateID string) ([]domai
 			Sensitivity: domain.VarSensitivity(sens),
 			SetPolicy:   domain.VarSetPolicy(pol),
 		}
+		if len(constraints) > 0 {
+			_ = json.Unmarshal(constraints, &def.Constraints)
+		}
 		out = append(out, def)
 	}
 	return out, rows.Err()
@@ -190,6 +319,332 @@ func (s *Store) GetTemplateGates(ctx context.Context, templateID string) (map[st
 	var gates map[string]string
 	_ = json.Unmarshal(gatesBytes, &gates)
 	return gates, nil
+}
+
+type TemplateVariableInput struct {
+	Key         string         `json:"key"`
+	Type        string         `json:"type"`
+	Required    bool           `json:"required"`
+	Sensitivity string         `json:"sensitivity"`
+	SetPolicy   string         `json:"set_policy"`
+	Constraints map[string]any `json:"constraints,omitempty"`
+}
+
+type TemplateAdminUpsert struct {
+	TemplateID       string
+	TemplateVersion  string
+	ContractType     string
+	Jurisdiction     string
+	DisplayName      string
+	RiskTier         string
+	Status           string
+	Visibility       string
+	OwnerPrincipalID *string
+	Metadata         map[string]any
+	TemplateGates    map[string]string
+	ProtectedSlots   []string
+	ProhibitedSlots  []string
+	Variables        []TemplateVariableInput
+	UpdatedByActorID *string
+}
+
+type TemplateAdminCloneInput struct {
+	TargetTemplateID      string
+	TargetTemplateVersion string
+	DisplayName           *string
+	Visibility            *string
+	OwnerPrincipalID      *string
+	Metadata              map[string]any
+}
+
+type TemplateAdminListFilter struct {
+	Status           string
+	Visibility       string
+	OwnerPrincipalID string
+	ContractType     string
+	Jurisdiction     string
+}
+
+func (s *Store) CreateAdminTemplate(ctx context.Context, in TemplateAdminUpsert) error {
+	return s.upsertAdminTemplate(ctx, in, true)
+}
+
+func (s *Store) UpdateAdminTemplate(ctx context.Context, in TemplateAdminUpsert) error {
+	return s.upsertAdminTemplate(ctx, in, false)
+}
+
+func (s *Store) CloneAdminTemplate(ctx context.Context, sourceTemplateID string, in TemplateAdminCloneInput) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var sourceExists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM templates WHERE template_id=$1)`, sourceTemplateID).Scan(&sourceExists); err != nil {
+		return err
+	}
+	if !sourceExists {
+		return pgx.ErrNoRows
+	}
+
+	var metadataArg any
+	if in.Metadata != nil {
+		metadataArg = encodeJSONOrDefault(in.Metadata, `{}`)
+	}
+
+	_, err = tx.Exec(ctx, `
+INSERT INTO templates(template_id,template_version,contract_type,jurisdiction,display_name,risk_tier,status,visibility,owner_principal_id,metadata,published_at,published_by,archived_at,archived_by,updated_at)
+SELECT
+	$2,
+	$3,
+	t.contract_type,
+	t.jurisdiction,
+	COALESCE($4, t.display_name),
+	t.risk_tier,
+	'DRAFT',
+	COALESCE($5, t.visibility),
+	COALESCE($6, t.owner_principal_id),
+	COALESCE($7::jsonb, t.metadata),
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	now()
+FROM templates t
+WHERE t.template_id=$1
+`, sourceTemplateID, in.TargetTemplateID, in.TargetTemplateVersion, in.DisplayName, in.Visibility, in.OwnerPrincipalID, metadataArg)
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+INSERT INTO template_governance(template_id,template_gates,protected_slots,prohibited_slots,updated_at)
+SELECT $2,template_gates,protected_slots,prohibited_slots,now()
+FROM template_governance
+WHERE template_id=$1
+`, sourceTemplateID, in.TargetTemplateID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+INSERT INTO template_variables(template_id,var_key,var_type,required,sensitivity,set_policy,constraints)
+SELECT $2,var_key,var_type,required,sensitivity,set_policy,constraints
+FROM template_variables
+WHERE template_id=$1
+`, sourceTemplateID, in.TargetTemplateID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) upsertAdminTemplate(ctx context.Context, in TemplateAdminUpsert, createOnly bool) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	metadata := encodeJSONOrDefault(in.Metadata, `{}`)
+	gates := encodeJSONOrDefault(in.TemplateGates, `{}`)
+
+	if createOnly {
+		_, err = tx.Exec(ctx, `
+INSERT INTO templates(template_id,template_version,contract_type,jurisdiction,display_name,risk_tier,status,visibility,owner_principal_id,metadata,published_at,published_by,archived_at,archived_by,updated_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,NULL,NULL,NULL,NULL,now())
+`, in.TemplateID, in.TemplateVersion, in.ContractType, in.Jurisdiction, in.DisplayName, in.RiskTier, in.Status, in.Visibility, in.OwnerPrincipalID, metadata)
+	} else {
+		_, err = tx.Exec(ctx, `
+UPDATE templates
+SET template_version=$2,
+    contract_type=$3,
+    jurisdiction=$4,
+    display_name=$5,
+    risk_tier=$6,
+    visibility=$7,
+    owner_principal_id=$8,
+    metadata=$9::jsonb,
+    updated_at=now()
+WHERE template_id=$1
+`, in.TemplateID, in.TemplateVersion, in.ContractType, in.Jurisdiction, in.DisplayName, in.RiskTier, in.Visibility, in.OwnerPrincipalID, metadata)
+	}
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+INSERT INTO template_governance(template_id,template_gates,protected_slots,prohibited_slots,updated_at)
+VALUES($1,$2::jsonb,$3,$4,now())
+ON CONFLICT (template_id) DO UPDATE
+SET template_gates=EXCLUDED.template_gates,
+    protected_slots=EXCLUDED.protected_slots,
+    prohibited_slots=EXCLUDED.prohibited_slots,
+    updated_at=now()
+`, in.TemplateID, gates, in.ProtectedSlots, in.ProhibitedSlots)
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM template_variables WHERE template_id=$1`, in.TemplateID); err != nil {
+		return err
+	}
+	for _, v := range in.Variables {
+		constraints := encodeJSONOrDefault(v.Constraints, `{}`)
+		if _, err := tx.Exec(ctx, `
+INSERT INTO template_variables(template_id,var_key,var_type,required,sensitivity,set_policy,constraints)
+VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)
+`, in.TemplateID, v.Key, v.Type, v.Required, v.Sensitivity, v.SetPolicy, constraints); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) PublishTemplate(ctx context.Context, templateID string, publishedBy *string) error {
+	_, err := s.DB.Exec(ctx, `
+UPDATE templates
+SET status='PUBLISHED',
+    published_at=now(),
+    published_by=$2,
+    archived_at=NULL,
+    archived_by=NULL,
+    updated_at=now()
+WHERE template_id=$1
+`, templateID, publishedBy)
+	return err
+}
+
+func (s *Store) ArchiveTemplate(ctx context.Context, templateID string, archivedBy *string) error {
+	_, err := s.DB.Exec(ctx, `
+UPDATE templates
+SET status='ARCHIVED',
+    archived_at=now(),
+    archived_by=$2,
+    updated_at=now()
+WHERE template_id=$1
+`, templateID, archivedBy)
+	return err
+}
+
+func (s *Store) ListAdminTemplates(ctx context.Context, f TemplateAdminListFilter) ([]Template, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT template_id,template_version,contract_type,jurisdiction,display_name,risk_tier,status,visibility,owner_principal_id,metadata,published_at,published_by,archived_at,archived_by
+FROM templates
+WHERE ($1='' OR status=$1)
+  AND ($2='' OR visibility=$2)
+  AND ($3='' OR owner_principal_id=$3)
+  AND ($4='' OR contract_type=$4)
+  AND ($5='' OR jurisdiction=$5)
+ORDER BY template_id ASC
+`, f.Status, f.Visibility, f.OwnerPrincipalID, f.ContractType, f.Jurisdiction)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Template, 0)
+	for rows.Next() {
+		var t Template
+		var metadataBytes []byte
+		if err := rows.Scan(
+			&t.TemplateID, &t.TemplateVersion, &t.ContractType, &t.Jurisdiction, &t.DisplayName, &t.RiskTier,
+			&t.Status, &t.Visibility, &t.OwnerPrincipalID, &metadataBytes,
+			&t.PublishedAt, &t.PublishedBy, &t.ArchivedAt, &t.ArchivedBy,
+		); err != nil {
+			return nil, err
+		}
+		t.Metadata = decodeMetadataJSON(metadataBytes)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetTemplateWithGovernance(ctx context.Context, templateID string) (Template, map[string]string, []domain.VariableDefinition, []string, []string, error) {
+	t, err := s.GetTemplate(ctx, templateID)
+	if err != nil {
+		return Template{}, nil, nil, nil, nil, err
+	}
+	var gatesBytes []byte
+	var protectedSlots []string
+	var prohibitedSlots []string
+	if err := s.DB.QueryRow(ctx, `
+SELECT template_gates,protected_slots,prohibited_slots
+FROM template_governance
+WHERE template_id=$1
+`, templateID).Scan(&gatesBytes, &protectedSlots, &prohibitedSlots); err != nil {
+		return Template{}, nil, nil, nil, nil, err
+	}
+	var gates map[string]string
+	_ = json.Unmarshal(gatesBytes, &gates)
+	vars, err := s.GetTemplateVars(ctx, templateID)
+	if err != nil {
+		return Template{}, nil, nil, nil, nil, err
+	}
+	return t, gates, vars, protectedSlots, prohibitedSlots, nil
+}
+
+func (s *Store) GetTemplateAdminIdempotency(ctx context.Context, adminSubject, key, endpoint string) (int, map[string]any, bool, error) {
+	var status int
+	var body []byte
+	err := s.DB.QueryRow(ctx, `
+SELECT response_status,response_body
+FROM template_admin_idempotency
+WHERE admin_subject=$1 AND idempotency_key=$2 AND endpoint=$3
+`, adminSubject, key, endpoint).Scan(&status, &body)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil, false, nil
+		}
+		return 0, nil, false, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		return 0, nil, false, err
+	}
+	return status, out, true, nil
+}
+
+func (s *Store) SaveTemplateAdminIdempotency(ctx context.Context, adminSubject, key, endpoint string, responseStatus int, responseBody map[string]any) error {
+	body, err := json.Marshal(responseBody)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.Exec(ctx, `
+INSERT INTO template_admin_idempotency(admin_subject,idempotency_key,endpoint,response_status,response_body)
+VALUES($1,$2,$3,$4,$5::jsonb)
+ON CONFLICT (admin_subject,idempotency_key,endpoint) DO NOTHING
+`, adminSubject, key, endpoint, responseStatus, string(body))
+	return err
+}
+
+func (s *Store) AddTemplateAdminAuditEvent(ctx context.Context, templateID, action, adminSubject string, actorID, principalID *string, payload map[string]any) error {
+	body := encodeJSONOrDefault(payload, `{}`)
+	_, err := s.DB.Exec(ctx, `
+INSERT INTO template_admin_audit_events(template_id,action,admin_subject,actor_id,principal_id,payload)
+VALUES($1,$2,$3,$4,$5,$6::jsonb)
+`, templateID, action, adminSubject, actorID, principalID, body)
+	return err
+}
+
+func encodeJSONOrDefault(v any, def string) string {
+	if v == nil {
+		return def
+	}
+	b, err := json.Marshal(v)
+	if err != nil || len(b) == 0 {
+		return def
+	}
+	return string(b)
+}
+
+func decodeMetadataJSON(b []byte) map[string]any {
+	if len(b) == 0 {
+		return map[string]any{}
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil || out == nil {
+		return map[string]any{}
+	}
+	return out
 }
 
 type Contract struct {

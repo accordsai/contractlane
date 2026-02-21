@@ -18,9 +18,10 @@ If you are running your own infrastructure:
 2. `docs/API_SPEC.md` (locked route surface)
 3. `docs/HOSTED_AGENT_JOURNEY.md` (hosted end-to-end flow)
 4. `docs/TEMPLATE_MODEL.md` (template scope: deployment/principal/actor/contract)
-5. `docs/SIG_V1.md` and `docs/AGENT_ID_V1.md`
-6. `docs/EVIDENCE_V1.md` and `docs/PROOF_BUNDLE_V1.md`
-7. `docs/CONFORMANCE.md`
+5. `docs/RULES_V1.md` (per-contract validation requirements)
+6. `docs/SIG_V1.md` and `docs/AGENT_ID_V1.md`
+7. `docs/EVIDENCE_V1.md` and `docs/PROOF_BUNDLE_V1.md`
+8. `docs/CONFORMANCE.md`
 
 ## Non-Negotiable v1 Rules
 
@@ -58,6 +59,22 @@ Self-hosted deployment:
 - You may expose and use IAL routes (for example `POST /ial/principals`, `POST /ial/actors/agents`).
 - If IAL is on a separate host, configure SDK/app `CONTRACTLANE_IAL_BASE_URL` accordingly.
 
+Template authoring note:
+
+- Authoring is an admin/operator path (`docs/TEMPLATE_AUTHORING.md`).
+- Agent integrators typically consume published templates via `GET /cel/templates`.
+- Template authoring lint failures are documented in `docs/TEMPLATE_LINT_ERRORS.md`.
+
+## Discovery Map (Hosted Integrators)
+
+Use this map if your goal is "connect to public provider, create contracts, sign, verify":
+
+1. Identity + token provisioning: `docs/HOSTED_AGENT_JOURNEY.md` section "Provision Identity".
+2. Template discovery and selection: `docs/HOSTED_AGENT_JOURNEY.md` section "Discover and Select a Template".
+3. Contract create + variables + actions + approvals: `docs/HOSTED_AGENT_JOURNEY.md` sections 3-6.
+4. Proof verification boundary: `docs/HOSTED_AGENT_JOURNEY.md` section "Fetch Proof and Verify Offline".
+5. If you also operate templates: `docs/TEMPLATE_AUTHORING.md` + `docs/TEMPLATE_LINT_ERRORS.md`.
+
 ## Agent Identity + Signature Contexts
 
 - Agent IDs: `agent:pk:ed25519:<base64url_no_padding_32_byte_pubkey>`
@@ -94,3 +111,6 @@ Common integration endpoints:
 - `POST /cel/approvals/{approval_request_id}:decide`
 - `GET /cel/contracts/{contract_id}/evidence?format=json`
 - `GET /cel/contracts/{contract_id}/proof-bundle?format=json`
+
+For catalog metadata and hosted-evaluation summary, see:
+- `OPENCLAW.md`
