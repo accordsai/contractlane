@@ -29,6 +29,9 @@ SDK publish notes:
      - `python3 -m twine upload dist/*`
    - install:
      - `pip install contractlane==1.0.0`
-3. TypeScript SDK: build/publish from `sdk/typescript`.
+3. TypeScript SDK:
+   - build/publish from `sdk/typescript`
+   - verify publish:
+     - `npm view @contractlane/sdk version`
 
 Only publish SDK artifacts after conformance passes.
