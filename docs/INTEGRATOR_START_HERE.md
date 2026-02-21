@@ -17,7 +17,7 @@ If you are running your own infrastructure:
 Use the SDK package manager path for your language:
 
 - Go:
-  - `go get github.com/accordsai/contractlane/sdk/go/contractlane@v1.0.1`
+  - `go get github.com/accordsai/contractlane/sdk/go/contractlane@v1.0.2`
 - Python:
   - `pip install contractlane==1.0.0`
 - TypeScript:

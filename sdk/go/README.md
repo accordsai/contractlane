@@ -7,7 +7,7 @@ Go module path:
 Install:
 
 ```bash
-go get github.com/accordsai/contractlane/sdk/go/contractlane@v1.0.1
+go get github.com/accordsai/contractlane/sdk/go/contractlane@v1.0.2
 ```
 
 Migration note:

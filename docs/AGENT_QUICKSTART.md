@@ -8,7 +8,7 @@ For hosted/public deployments, use `docs/HOSTED_AGENT_JOURNEY.md` as the primary
 
 Go:
 
-`go get github.com/accordsai/contractlane/sdk/go/contractlane@v1.0.1`
+`go get github.com/accordsai/contractlane/sdk/go/contractlane@v1.0.2`
 
 Python:
 
