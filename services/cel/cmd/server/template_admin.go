@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"strings"
 
-	"contractlane/pkg/domain"
-	"contractlane/pkg/httpx"
-	"contractlane/services/cel/internal/store"
+	"github.com/accordsai/contractlane/pkg/domain"
+	"github.com/accordsai/contractlane/pkg/httpx"
+	"github.com/accordsai/contractlane/services/cel/internal/store"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"

@@ -5,7 +5,7 @@ import (
 	"io"
 	"os"
 
-	"contractlane/pkg/evp"
+	"github.com/accordsai/contractlane/pkg/evp"
 )
 
 func main() {

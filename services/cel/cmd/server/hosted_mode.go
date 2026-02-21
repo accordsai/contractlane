@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"contractlane/pkg/httpx"
+	"github.com/accordsai/contractlane/pkg/httpx"
 )
 
 type hostedModeConfig struct {

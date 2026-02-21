@@ -6,8 +6,8 @@ import (
 	"io"
 	"os"
 
-	"contractlane/pkg/evidencehash"
-	clsdk "contractlane/sdk/go/contractlane"
+	"github.com/accordsai/contractlane/pkg/evidencehash"
+	clsdk "github.com/accordsai/contractlane/sdk/go/contractlane"
 )
 
 func main() {

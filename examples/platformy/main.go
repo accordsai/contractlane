@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"contractlane/pkg/gatesdk"
+	"github.com/accordsai/contractlane/pkg/gatesdk"
 )
 
 func main() {

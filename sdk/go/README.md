@@ -1,11 +1,25 @@
 # Go SDK
 
-Package path: `sdk/go/contractlane`
+Go module path:
+
+- `github.com/accordsai/contractlane/sdk/go/contractlane`
+
+Install:
+
+```bash
+go get github.com/accordsai/contractlane/sdk/go/contractlane@v1.0.0
+```
+
+Migration note:
+
+- Old local import style: `contractlane/sdk/go/contractlane`
+- Canonical import path going forward: `github.com/accordsai/contractlane/sdk/go/contractlane`
 
 Run tests:
 
 ```bash
 go test ./sdk/go/contractlane -count=1
+cd sdk/go/contractlane && GOCACHE=/tmp/go-build go test ./... -count=1
 ```
 
 ## Template Admin Methods

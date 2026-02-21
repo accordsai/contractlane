@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"contractlane/pkg/evidencehash"
+	"github.com/accordsai/contractlane/pkg/evidencehash"
 )
 
 var (

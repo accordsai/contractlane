@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"contractlane/pkg/evidencehash"
+	"github.com/accordsai/contractlane/pkg/evidencehash"
 )
 
 var base64URLNoPaddingPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)

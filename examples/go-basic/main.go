@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"contractlane/sdk/go/contractlane"
+	"github.com/accordsai/contractlane/sdk/go/contractlane"
 )
 
 func main() {

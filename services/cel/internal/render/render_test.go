@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"contractlane/pkg/domain"
+	"github.com/accordsai/contractlane/pkg/domain"
 )
 
 func TestRenderDeterministic(t *testing.T) {

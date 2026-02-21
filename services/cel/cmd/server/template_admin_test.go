@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"contractlane/pkg/authn"
-	"contractlane/pkg/domain"
-	"contractlane/services/cel/internal/store"
+	"github.com/accordsai/contractlane/pkg/authn"
+	"github.com/accordsai/contractlane/pkg/domain"
+	"github.com/accordsai/contractlane/services/cel/internal/store"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )

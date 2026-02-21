@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"contractlane/pkg/evp"
+	"github.com/accordsai/contractlane/pkg/evp"
 )
 
 type liveEnv struct {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	signaturev1 "contractlane/pkg/signature"
+	signaturev1 "github.com/accordsai/contractlane/pkg/signature"
 )
 
 type DelegationRevocationV1 struct {

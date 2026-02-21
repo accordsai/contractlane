@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"contractlane/pkg/domain"
+	"github.com/accordsai/contractlane/pkg/domain"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"

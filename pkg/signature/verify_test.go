@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"contractlane/pkg/evidencehash"
+	"github.com/accordsai/contractlane/pkg/evidencehash"
 )
 
 func TestVerifyEnvelopeV1_Ed25519HappyPath(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	signaturev1 "contractlane/pkg/signature"
+	signaturev1 "github.com/accordsai/contractlane/pkg/signature"
 )
 
 type ValidatedCommerceIntentSubmission struct {

@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"contractlane/pkg/db"
-	"contractlane/pkg/domain"
-	"contractlane/pkg/evidencehash"
-	"contractlane/pkg/httpx"
-	"contractlane/services/ial/internal/store"
+	"github.com/accordsai/contractlane/pkg/db"
+	"github.com/accordsai/contractlane/pkg/domain"
+	"github.com/accordsai/contractlane/pkg/evidencehash"
+	"github.com/accordsai/contractlane/pkg/httpx"
+	"github.com/accordsai/contractlane/services/ial/internal/store"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"

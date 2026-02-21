@@ -14,10 +14,10 @@ import (
 	"sync"
 	"time"
 
-	"contractlane/pkg/db"
-	"contractlane/pkg/httpx"
-	"contractlane/services/onboarding/internal/ialclient"
-	"contractlane/services/onboarding/internal/store"
+	"github.com/accordsai/contractlane/pkg/db"
+	"github.com/accordsai/contractlane/pkg/httpx"
+	"github.com/accordsai/contractlane/services/onboarding/internal/ialclient"
+	"github.com/accordsai/contractlane/services/onboarding/internal/store"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"

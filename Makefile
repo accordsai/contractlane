@@ -3,7 +3,7 @@ SHELL := /bin/bash
 PY_SDK_VENV := sdk/python/.venv
 PY_SDK_PYTHON := $(PY_SDK_VENV)/bin/python
 
-.PHONY: up up-dev up-prod down down-prod migrate migrate-prod test smoke logs logs-prod fmt sdk-test sdk-conformance wait-ready wait-ready-prod sdk-python-venv test-sdk-python sdk-sanity onboarding-up onboarding-down onboarding-migrate onboarding-smoke
+.PHONY: up up-dev up-prod down down-prod migrate migrate-prod test smoke logs logs-prod fmt sdk-test sdk-conformance wait-ready wait-ready-prod sdk-python-venv test-sdk-python test-sdk-go-module sdk-sanity onboarding-up onboarding-down onboarding-migrate onboarding-smoke
 
 up:
 	docker compose -f docker-compose.dev.yml up --build -d
@@ -96,8 +96,12 @@ sdk-python-venv:
 test-sdk-python: sdk-python-venv
 	PYTHONNOUSERSITE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(PY_SDK_PYTHON) -m pytest sdk/python/tests -q
 
+test-sdk-go-module:
+	cd sdk/go/contractlane && GOCACHE=/tmp/go-build go test ./... -count=1
+
 sdk-test: wait-ready
 	go test ./sdk/go/contractlane -count=1
+	$(MAKE) test-sdk-go-module
 	test -f sdk/typescript/package-lock.json || (echo "sdk/typescript/package-lock.json is required for npm ci"; exit 1)
 	cd sdk/typescript && npm ci && npm run build && CL_INTEGRATION=1 CL_BASE_URL=http://localhost:8080 CL_IAL_BASE_URL=http://localhost:8081 npm test
 	$(MAKE) sdk-python-venv

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	pkgwebhooks "contractlane/pkg/webhooks"
+	pkgwebhooks "github.com/accordsai/contractlane/pkg/webhooks"
 
-	"contractlane/pkg/httpx"
+	"github.com/accordsai/contractlane/pkg/httpx"
 	"github.com/go-chi/chi/v5"
 )
 

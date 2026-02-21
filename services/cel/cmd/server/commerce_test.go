@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	clsdk "contractlane/sdk/go/contractlane"
-	"contractlane/services/cel/internal/store"
+	clsdk "github.com/accordsai/contractlane/sdk/go/contractlane"
+	"github.com/accordsai/contractlane/services/cel/internal/store"
 )
 
 func TestEvaluateHostedCommerceAuthorization_MissingDelegation(t *testing.T) {

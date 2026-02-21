@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"contractlane/sdk/go/contractlane"
+	"github.com/accordsai/contractlane/sdk/go/contractlane"
 )
 
 type repeatStringFlag []string

@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	signaturev1 "contractlane/pkg/signature"
+	signaturev1 "github.com/accordsai/contractlane/pkg/signature"
 )
 
 func TestAgentID_GenerateAndParse_RoundTrip(t *testing.T) {

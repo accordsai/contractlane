@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"contractlane/pkg/evidencehash"
+	"github.com/accordsai/contractlane/pkg/evidencehash"
 )
 
 func TestDeriveSettlementAttestationsFromReceipts_Deterministic(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"contractlane/pkg/evidencehash"
+	"github.com/accordsai/contractlane/pkg/evidencehash"
 )
 
 func VerifyBundleJSON(bundleBytes []byte) (Result, error) {

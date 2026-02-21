@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"contractlane/pkg/evidencehash"
+	"github.com/accordsai/contractlane/pkg/evidencehash"
 )
 
 type SignedCommerceIntentV1 struct {

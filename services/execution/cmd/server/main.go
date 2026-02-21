@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"contractlane/pkg/authn"
-	"contractlane/pkg/db"
-	"contractlane/pkg/httpx"
-	"contractlane/services/execution/internal/webhooks"
+	"github.com/accordsai/contractlane/pkg/authn"
+	"github.com/accordsai/contractlane/pkg/db"
+	"github.com/accordsai/contractlane/pkg/httpx"
+	"github.com/accordsai/contractlane/services/execution/internal/webhooks"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"

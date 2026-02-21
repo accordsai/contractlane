@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"contractlane/pkg/evp"
+	"github.com/accordsai/contractlane/pkg/evp"
 )
 
 func TestVerifySettlementProofV1_Fixture(t *testing.T) {

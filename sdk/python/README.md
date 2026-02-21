@@ -2,6 +2,21 @@
 
 Package path: `sdk/python/contractlane`
 
+Install from PyPI:
+
+```bash
+pip install contractlane==1.0.0
+```
+
+Build and publish:
+
+```bash
+cd sdk/python
+python3 -m pip install --upgrade build twine
+python3 -m build
+python3 -m twine upload dist/*
+```
+
 Run tests:
 
 ```bash

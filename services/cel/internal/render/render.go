@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"contractlane/pkg/domain"
+	"github.com/accordsai/contractlane/pkg/domain"
 )
 
 const DeterminismVersion = "render-v1"

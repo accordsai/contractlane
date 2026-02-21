@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"contractlane/pkg/evidencehash"
-	signaturev1 "contractlane/pkg/signature"
+	"github.com/accordsai/contractlane/pkg/evidencehash"
+	signaturev1 "github.com/accordsai/contractlane/pkg/signature"
 )
 
 const (

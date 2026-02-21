@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"contractlane/pkg/evidencehash"
-	"contractlane/pkg/evp"
+	"github.com/accordsai/contractlane/pkg/evidencehash"
+	"github.com/accordsai/contractlane/pkg/evp"
 )
 
 type ContractExportV1 struct {

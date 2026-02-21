@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"contractlane/pkg/domain"
+	"github.com/accordsai/contractlane/pkg/domain"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"

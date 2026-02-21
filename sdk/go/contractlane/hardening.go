@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"contractlane/pkg/evidencehash"
+	"github.com/accordsai/contractlane/pkg/evidencehash"
 )
 
 type VerifyFailureCode string
@@ -29,10 +29,10 @@ const (
 )
 
 type VerifyReport struct {
-	OK      bool             `json:"ok"`
+	OK      bool              `json:"ok"`
 	Code    VerifyFailureCode `json:"code"`
-	ProofID string           `json:"proof_id,omitempty"`
-	Message string           `json:"message,omitempty"`
+	ProofID string            `json:"proof_id,omitempty"`
+	Message string            `json:"message,omitempty"`
 }
 
 func Canonicalize(v any) ([]byte, error) {
