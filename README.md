@@ -11,6 +11,26 @@ make smoke
 BASE_URL=http://localhost:8082 ./conformance/runner/run_local_conformance.sh
 ```
 
+## SDK Install
+
+Go:
+
+```bash
+go get github.com/accordsai/contractlane/sdk/go/contractlane@v1.0.0
+```
+
+Python:
+
+```bash
+pip install contractlane==1.0.0
+```
+
+TypeScript:
+
+```bash
+npm install @contractlane/sdk
+```
+
 ## Production Demo (Docker)
 
 ```bash

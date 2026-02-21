@@ -12,6 +12,19 @@ If you are running your own infrastructure:
 
 - Self-hosted/operator path: continue below and see `docs/ONBOARDING_SERVICE.md`
 
+## Install SDKs
+
+Use the SDK package manager path for your language:
+
+- Go:
+  - `go get github.com/accordsai/contractlane/sdk/go/contractlane@v1.0.0`
+- Python:
+  - `pip install contractlane==1.0.0`
+- TypeScript:
+  - `npm install @contractlane/sdk`
+
+If you are pinning versions in production, use the exact released version for each SDK.
+
 ## Read In This Order
 
 1. `docs/PROTOCOL.md` (authoritative identifiers and compatibility rule)

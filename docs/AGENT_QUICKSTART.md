@@ -4,6 +4,20 @@ This quickstart is the shortest practical path for an agent integrator.
 
 For hosted/public deployments, use `docs/HOSTED_AGENT_JOURNEY.md` as the primary entrypoint.
 
+## Install an SDK
+
+Go:
+
+`go get github.com/accordsai/contractlane/sdk/go/contractlane@v1.0.0`
+
+Python:
+
+`pip install contractlane==1.0.0`
+
+TypeScript:
+
+`npm install @contractlane/sdk`
+
 ## Prerequisites
 
 - A running Contract Lane node.
