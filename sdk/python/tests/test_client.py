@@ -109,6 +109,90 @@ def test_create_contract_error_mapping_parity():
     assert str(err) == "template missing"
 
 
+def test_template_admin_create_payload_and_idempotency_header():
+    captured = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured["path"] = req.url.path
+        captured["idempotency"] = req.headers.get("Idempotency-Key")
+        captured["json"] = json.loads(req.content.decode("utf-8"))
+        return httpx.Response(201, json={"template_id": "tpl_private_demo", "status": "DRAFT"})
+
+    c = ContractLaneClient("http://x", PrincipalAuth("tok"))
+    c.http = httpx.Client(transport=httpx.MockTransport(handler))
+    out = c.create_template(
+        {
+            "template_id": "tpl_private_demo",
+            "template_version": "v1",
+            "contract_type": "NDA",
+            "jurisdiction": "US",
+            "display_name": "NDA private",
+            "risk_tier": "LOW",
+            "visibility": "PRIVATE",
+            "variables": [],
+        },
+        idempotency_key="idem-create-1",
+    )
+    assert captured["path"] == "/cel/admin/templates"
+    assert captured["idempotency"] == "idem-create-1"
+    assert captured["json"]["template_id"] == "tpl_private_demo"
+    assert out["status"] == "DRAFT"
+
+
+def test_template_admin_list_filters_query_encoding():
+    captured = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured["query"] = req.url.query.decode("utf-8")
+        return httpx.Response(200, json={"templates": []})
+
+    c = ContractLaneClient("http://x", PrincipalAuth("tok"))
+    c.http = httpx.Client(transport=httpx.MockTransport(handler))
+    c.list_templates_admin(
+        status="PUBLISHED",
+        visibility="PRIVATE",
+        owner_principal_id="prn_1",
+        contract_type="NDA",
+        jurisdiction="US",
+    )
+    q = captured["query"]
+    assert "status=PUBLISHED" in q
+    assert "visibility=PRIVATE" in q
+    assert "owner_principal_id=prn_1" in q
+    assert "contract_type=NDA" in q
+    assert "jurisdiction=US" in q
+
+
+def test_template_lint_failed_details_array_preserved():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            422,
+            json={
+                "error": {
+                    "code": "TEMPLATE_LINT_FAILED",
+                    "message": "template validation failed",
+                    "details": [
+                        {
+                            "path": "variables[0].key",
+                            "code": "FORMAT_INVALID",
+                            "message": "invalid variable key format: Bad-Key",
+                        }
+                    ],
+                },
+                "request_id": "req_lint_1",
+            },
+        )
+
+    c = ContractLaneClient("http://x", PrincipalAuth("tok"))
+    c.http = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(Exception) as ex:
+        c.create_template({"template_id": "tpl_bad"}, idempotency_key="idem-lint-1")
+    err = ex.value
+    assert getattr(err, "status_code", None) == 422
+    assert getattr(err, "error_code", None) == "TEMPLATE_LINT_FAILED"
+    assert isinstance(getattr(err, "details", None), list)
+
+
 def test_conformance_cases_exist():
     root = Path(__file__).resolve().parents[3]
     for name in [

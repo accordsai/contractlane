@@ -86,6 +86,77 @@ test('createContract error mapping parity', async () => {
   );
 });
 
+test('template admin create uses path/body/idempotency header', async () => {
+  let capturedPath = '';
+  let capturedBody: Record<string, unknown> = {};
+  let capturedIdempotency = '';
+  const fetchFn: typeof fetch = async (url, init) => {
+    capturedPath = new URL(String(url)).pathname;
+    capturedBody = JSON.parse(String(init?.body ?? '{}'));
+    capturedIdempotency = String((init?.headers as Record<string, string>)?.['Idempotency-Key'] ?? '');
+    return new Response(JSON.stringify({ template_id: 'tpl_private_demo', status: 'DRAFT' }), { status: 201 }) as any;
+  };
+  const client = new ContractLaneClient({ baseUrl: 'http://example.com', auth: new PrincipalAuth('tok'), fetchFn });
+  const out = await client.createTemplate(
+    {
+      template_id: 'tpl_private_demo',
+      template_version: 'v1',
+      contract_type: 'NDA',
+      jurisdiction: 'US',
+      display_name: 'NDA private',
+      risk_tier: 'LOW',
+      visibility: 'PRIVATE',
+      variables: [],
+    },
+    { idempotencyKey: 'idem-create-1' },
+  );
+  assert.equal(capturedPath, '/cel/admin/templates');
+  assert.equal(capturedIdempotency, 'idem-create-1');
+  assert.equal(capturedBody.template_id, 'tpl_private_demo');
+  assert.equal(out.status, 'DRAFT');
+});
+
+test('template admin list query filters encode correctly', async () => {
+  let capturedQuery = '';
+  const fetchFn: typeof fetch = async (url) => {
+    capturedQuery = new URL(String(url)).search;
+    return new Response(JSON.stringify({ templates: [] }), { status: 200 }) as any;
+  };
+  const client = new ContractLaneClient({ baseUrl: 'http://example.com', auth: new PrincipalAuth('tok'), fetchFn });
+  await client.listTemplatesAdmin({
+    status: 'PUBLISHED',
+    visibility: 'PRIVATE',
+    owner_principal_id: 'prn_1',
+    contract_type: 'NDA',
+    jurisdiction: 'US',
+  });
+  assert.match(capturedQuery, /status=PUBLISHED/);
+  assert.match(capturedQuery, /visibility=PRIVATE/);
+  assert.match(capturedQuery, /owner_principal_id=prn_1/);
+  assert.match(capturedQuery, /contract_type=NDA/);
+  assert.match(capturedQuery, /jurisdiction=US/);
+});
+
+test('template lint error preserves details array', async () => {
+  const fetchFn: typeof fetch = async () =>
+    new Response(
+      JSON.stringify({
+        error: {
+          code: 'TEMPLATE_LINT_FAILED',
+          message: 'template validation failed',
+          details: [{ path: 'variables[0].key', code: 'FORMAT_INVALID', message: 'invalid variable key format: Bad-Key' }],
+        },
+        request_id: 'req_lint_1',
+      }),
+      { status: 422 },
+    ) as any;
+  const client = new ContractLaneClient({ baseUrl: 'http://example.com', auth: new PrincipalAuth('tok'), fetchFn, retry: { maxAttempts: 1 } });
+  await assert.rejects(
+    () => client.createTemplate({ template_id: 'tpl_bad' } as any, { idempotencyKey: 'idem-lint-1' }),
+    (err: any) => err?.status_code === 422 && err?.error_code === 'TEMPLATE_LINT_FAILED' && Array.isArray(err?.details),
+  );
+});
+
 test('conformance cases exist', () => {
   const root = path.resolve(process.cwd(), '..', '..');
   const names = [

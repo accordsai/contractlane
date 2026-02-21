@@ -33,6 +33,70 @@ export type CreateContractResponse = {
   contract?: Record<string, unknown>;
   raw: Record<string, unknown>;
 };
+export type TemplateVariableInput = {
+  key: string;
+  type: string;
+  required: boolean;
+  sensitivity: string;
+  set_policy: string;
+  constraints?: Record<string, unknown>;
+};
+export type TemplateAdminUpsertInput = {
+  template_id: string;
+  template_version: string;
+  contract_type: string;
+  jurisdiction: string;
+  display_name: string;
+  risk_tier: string;
+  visibility: string;
+  owner_principal_id?: string | null;
+  metadata?: Record<string, unknown>;
+  template_gates?: Record<string, string>;
+  protected_slots?: string[];
+  prohibited_slots?: string[];
+  variables?: TemplateVariableInput[];
+};
+export type TemplateAdminTemplate = {
+  template_id: string;
+  template_version: string;
+  contract_type?: string;
+  jurisdiction?: string;
+  display_name?: string;
+  risk_tier?: string;
+  status?: string;
+  visibility?: string;
+  owner_principal_id?: string | null;
+  metadata?: Record<string, unknown>;
+  published_at?: string;
+  published_by?: string | null;
+  [k: string]: unknown;
+};
+export type TemplateAdminListFilters = {
+  status?: string;
+  visibility?: string;
+  owner_principal_id?: string;
+  contract_type?: string;
+  jurisdiction?: string;
+};
+export type TemplateAdminCloneInput = {
+  template_id: string;
+  template_version?: string;
+  display_name?: string;
+  visibility?: string;
+  owner_principal_id?: string | null;
+  metadata?: Record<string, unknown>;
+};
+export type TemplateShareRequest = {
+  principal_id: string;
+};
+export type TemplateSharesResponse = {
+  request_id?: string;
+  admin?: string;
+  template_id?: string;
+  visibility?: string;
+  shares?: Record<string, unknown>[];
+  raw: Record<string, unknown>;
+};
 export type Evidence = Record<string, unknown>;
 export type ContractEvidenceBundle = Record<string, unknown>;
 export type CommerceAmountV1 = { currency: string; amount: string };
@@ -176,8 +240,8 @@ export class ContractLaneError extends Error {
   status_code: number;
   error_code?: string;
   request_id?: string;
-  details?: Record<string, unknown>;
-  constructor(init: { status_code: number; error_code?: string; message: string; request_id?: string; details?: Record<string, unknown> }) {
+  details?: unknown;
+  constructor(init: { status_code: number; error_code?: string; message: string; request_id?: string; details?: unknown }) {
     super(init.message);
     this.status_code = init.status_code;
     this.error_code = init.error_code;
@@ -368,6 +432,67 @@ export class ContractLaneClient {
     };
   }
 
+  async createTemplate(input: TemplateAdminUpsertInput, opts?: { idempotencyKey?: string }): Promise<Record<string, unknown>> {
+    return this.request('POST', '/cel/admin/templates', input as Record<string, unknown>, this.idempotencyHeaders(opts?.idempotencyKey), true);
+  }
+
+  async updateTemplate(templateId: string, input: TemplateAdminUpsertInput, opts?: { idempotencyKey?: string }): Promise<Record<string, unknown>> {
+    return this.request('PUT', `/cel/admin/templates/${encodeURIComponent(templateId)}`, input as Record<string, unknown>, this.idempotencyHeaders(opts?.idempotencyKey), true);
+  }
+
+  async publishTemplate(templateId: string, opts?: { idempotencyKey?: string }): Promise<Record<string, unknown>> {
+    return this.request('POST', `/cel/admin/templates/${encodeURIComponent(templateId)}:publish`, {}, this.idempotencyHeaders(opts?.idempotencyKey), true);
+  }
+
+  async archiveTemplate(templateId: string, opts?: { idempotencyKey?: string }): Promise<Record<string, unknown>> {
+    return this.request('POST', `/cel/admin/templates/${encodeURIComponent(templateId)}:archive`, {}, this.idempotencyHeaders(opts?.idempotencyKey), true);
+  }
+
+  async cloneTemplate(templateId: string, input: TemplateAdminCloneInput, opts?: { idempotencyKey?: string }): Promise<Record<string, unknown>> {
+    return this.request('POST', `/cel/admin/templates/${encodeURIComponent(templateId)}:clone`, input as Record<string, unknown>, this.idempotencyHeaders(opts?.idempotencyKey), true);
+  }
+
+  async getTemplateAdmin(templateId: string): Promise<Record<string, unknown>> {
+    return this.request('GET', `/cel/admin/templates/${encodeURIComponent(templateId)}`, undefined, undefined, true);
+  }
+
+  async listTemplatesAdmin(filters?: TemplateAdminListFilters): Promise<Record<string, unknown>> {
+    const q = new URLSearchParams();
+    if (filters?.status) q.set('status', filters.status);
+    if (filters?.visibility) q.set('visibility', filters.visibility);
+    if (filters?.owner_principal_id) q.set('owner_principal_id', filters.owner_principal_id);
+    if (filters?.contract_type) q.set('contract_type', filters.contract_type);
+    if (filters?.jurisdiction) q.set('jurisdiction', filters.jurisdiction);
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    return this.request('GET', `/cel/admin/templates${suffix}`, undefined, undefined, true);
+  }
+
+  async listTemplateShares(templateId: string): Promise<TemplateSharesResponse> {
+    const raw = await this.request('GET', `/cel/admin/templates/${encodeURIComponent(templateId)}/shares`, undefined, undefined, true);
+    return {
+      request_id: raw.request_id as string | undefined,
+      admin: raw.admin as string | undefined,
+      template_id: raw.template_id as string | undefined,
+      visibility: raw.visibility as string | undefined,
+      shares: raw.shares as Record<string, unknown>[] | undefined,
+      raw,
+    };
+  }
+
+  async addTemplateShare(templateId: string, principalId: string, opts?: { idempotencyKey?: string }): Promise<Record<string, unknown>> {
+    return this.request(
+      'POST',
+      `/cel/admin/templates/${encodeURIComponent(templateId)}/shares`,
+      { principal_id: principalId } as TemplateShareRequest as Record<string, unknown>,
+      this.idempotencyHeaders(opts?.idempotencyKey),
+      true,
+    );
+  }
+
+  async removeTemplateShare(templateId: string, principalId: string, opts?: { idempotencyKey?: string }): Promise<Record<string, unknown>> {
+    return this.request('DELETE', `/cel/admin/templates/${encodeURIComponent(templateId)}/shares/${encodeURIComponent(principalId)}`, undefined, this.idempotencyHeaders(opts?.idempotencyKey), true);
+  }
+
   setSigningKeyEd25519(secretKey: Uint8Array, keyId?: string): void {
     if (!secretKey || secretKey.length !== 64) {
       throw new Error('ed25519 secretKey must be 64 bytes (tweetnacl format)');
@@ -512,8 +637,13 @@ export class ContractLaneClient {
       error_code: (inner.error_code as string | undefined) ?? (inner.code as string | undefined),
       message: (inner.message as string | undefined) ?? text ?? `HTTP ${status}`,
       request_id: (inner.request_id as string | undefined) ?? (parsed.request_id as string | undefined),
-      details: inner.details as Record<string, unknown> | undefined,
+      details: inner.details,
     });
+  }
+
+  private idempotencyHeaders(idempotencyKey?: string): Record<string, string> | undefined {
+    if (!idempotencyKey || !idempotencyKey.trim()) return undefined;
+    return { 'Idempotency-Key': idempotencyKey.trim() };
   }
 }
 

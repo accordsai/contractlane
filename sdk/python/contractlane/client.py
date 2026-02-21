@@ -28,12 +28,12 @@ class RetryConfig:
 
 
 class SDKError(Exception):
-    def __init__(self, status_code: int, error_code: Optional[str], message: str, request_id: Optional[str] = None, details: Optional[Dict[str, Any]] = None):
+    def __init__(self, status_code: int, error_code: Optional[str], message: str, request_id: Optional[str] = None, details: Optional[Any] = None):
         super().__init__(message)
         self.status_code = status_code
         self.error_code = error_code
         self.request_id = request_id
-        self.details = details or {}
+        self.details = details
 
 
 class IncompatibleNodeError(Exception):
@@ -271,6 +271,114 @@ class ContractLaneClient:
             body["locale"] = locale
         return self._request("POST", path, body, None, True)
 
+    def create_template(self, payload: Dict[str, Any], idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        return self._request("POST", "/cel/admin/templates", payload, headers, True)
+
+    def update_template(self, template_id: str, payload: Dict[str, Any], idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        path = f"/cel/admin/templates/{quote(template_id, safe='')}"
+        return self._request("PUT", path, payload, headers, True)
+
+    def publish_template(self, template_id: str, *, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        path = f"/cel/admin/templates/{quote(template_id, safe='')}:publish"
+        return self._request("POST", path, {}, headers, True)
+
+    def archive_template(self, template_id: str, *, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        path = f"/cel/admin/templates/{quote(template_id, safe='')}:archive"
+        return self._request("POST", path, {}, headers, True)
+
+    def clone_template(self, template_id: str, payload: Dict[str, Any], *, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        path = f"/cel/admin/templates/{quote(template_id, safe='')}:clone"
+        return self._request("POST", path, payload, headers, True)
+
+    def get_template_admin(self, template_id: str) -> Dict[str, Any]:
+        path = f"/cel/admin/templates/{quote(template_id, safe='')}"
+        return self._request("GET", path, None, None, True)
+
+    def list_templates_admin(
+        self,
+        *,
+        status: Optional[str] = None,
+        visibility: Optional[str] = None,
+        owner_principal_id: Optional[str] = None,
+        contract_type: Optional[str] = None,
+        jurisdiction: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        q: list[str] = []
+        if status:
+            q.append(f"status={quote(status, safe='')}")
+        if visibility:
+            q.append(f"visibility={quote(visibility, safe='')}")
+        if owner_principal_id:
+            q.append(f"owner_principal_id={quote(owner_principal_id, safe='')}")
+        if contract_type:
+            q.append(f"contract_type={quote(contract_type, safe='')}")
+        if jurisdiction:
+            q.append(f"jurisdiction={quote(jurisdiction, safe='')}")
+        suffix = ("?" + "&".join(q)) if q else ""
+        return self._request("GET", f"/cel/admin/templates{suffix}", None, None, True)
+
+    def list_template_shares(self, template_id: str) -> Dict[str, Any]:
+        path = f"/cel/admin/templates/{quote(template_id, safe='')}/shares"
+        return self._request("GET", path, None, None, True)
+
+    def add_template_share(self, template_id: str, principal_id: str, *, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        path = f"/cel/admin/templates/{quote(template_id, safe='')}/shares"
+        return self._request("POST", path, {"principal_id": principal_id}, headers, True)
+
+    def remove_template_share(self, template_id: str, principal_id: str, *, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+        path = f"/cel/admin/templates/{quote(template_id, safe='')}/shares/{quote(principal_id, safe='')}"
+        return self._request("DELETE", path, None, headers, True)
+
+    def createTemplate(self, payload: Dict[str, Any], idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        return self.create_template(payload, idempotency_key=idempotency_key)
+
+    def updateTemplate(self, template_id: str, payload: Dict[str, Any], idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        return self.update_template(template_id, payload, idempotency_key=idempotency_key)
+
+    def publishTemplate(self, template_id: str, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        return self.publish_template(template_id, idempotency_key=idempotency_key)
+
+    def archiveTemplate(self, template_id: str, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        return self.archive_template(template_id, idempotency_key=idempotency_key)
+
+    def cloneTemplate(self, template_id: str, payload: Dict[str, Any], idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        return self.clone_template(template_id, payload, idempotency_key=idempotency_key)
+
+    def getTemplateAdmin(self, template_id: str) -> Dict[str, Any]:
+        return self.get_template_admin(template_id)
+
+    def listTemplatesAdmin(
+        self,
+        status: Optional[str] = None,
+        visibility: Optional[str] = None,
+        owner_principal_id: Optional[str] = None,
+        contract_type: Optional[str] = None,
+        jurisdiction: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.list_templates_admin(
+            status=status,
+            visibility=visibility,
+            owner_principal_id=owner_principal_id,
+            contract_type=contract_type,
+            jurisdiction=jurisdiction,
+        )
+
+    def listTemplateShares(self, template_id: str) -> Dict[str, Any]:
+        return self.list_template_shares(template_id)
+
+    def addTemplateShare(self, template_id: str, principal_id: str, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        return self.add_template_share(template_id, principal_id, idempotency_key=idempotency_key)
+
+    def removeTemplateShare(self, template_id: str, principal_id: str, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        return self.remove_template_share(template_id, principal_id, idempotency_key=idempotency_key)
+
     def set_signing_key_ed25519(self, seed32: bytes, key_id: Optional[str] = None) -> None:
         if not isinstance(seed32, (bytes, bytearray)) or len(seed32) != 32:
             raise ValueError("ed25519 signing key seed must be 32 bytes")
@@ -392,7 +500,7 @@ class ContractLaneClient:
             error_code=inner.get("error_code") or inner.get("code"),
             message=inner.get("message") or f"HTTP {resp.status_code}",
             request_id=inner.get("request_id") or parsed.get("request_id"),
-            details=inner.get("details") if isinstance(inner.get("details"), dict) else None,
+            details=inner.get("details"),
         )
 
 

@@ -40,7 +40,7 @@ type Error struct {
 	ErrorCode  string
 	Message    string
 	RequestID  string
-	Details    map[string]any
+	Details    any
 }
 
 func (e *Error) Error() string {
@@ -113,6 +113,104 @@ type ContractRender struct {
 	VariablesSnapshot  map[string]string `json:"variables_snapshot,omitempty"`
 	DeterminismVersion string            `json:"determinism_version,omitempty"`
 	Raw                map[string]any    `json:"-"`
+}
+
+type TemplateVariableInput struct {
+	Key         string         `json:"key"`
+	Type        string         `json:"type"`
+	Required    bool           `json:"required"`
+	Sensitivity string         `json:"sensitivity"`
+	SetPolicy   string         `json:"set_policy"`
+	Constraints map[string]any `json:"constraints,omitempty"`
+}
+
+type TemplateAdminUpsertRequest struct {
+	TemplateID      string                  `json:"template_id"`
+	TemplateVersion string                  `json:"template_version"`
+	ContractType    string                  `json:"contract_type"`
+	Jurisdiction    string                  `json:"jurisdiction"`
+	DisplayName     string                  `json:"display_name"`
+	RiskTier        string                  `json:"risk_tier"`
+	Visibility      string                  `json:"visibility"`
+	OwnerPrincipal  *string                 `json:"owner_principal_id"`
+	Metadata        map[string]any          `json:"metadata,omitempty"`
+	TemplateGates   map[string]string       `json:"template_gates,omitempty"`
+	ProtectedSlots  []string                `json:"protected_slots,omitempty"`
+	ProhibitedSlots []string                `json:"prohibited_slots,omitempty"`
+	Variables       []TemplateVariableInput `json:"variables,omitempty"`
+}
+
+type TemplateAdminTemplate struct {
+	TemplateID      string         `json:"template_id"`
+	TemplateVersion string         `json:"template_version"`
+	ContractType    string         `json:"contract_type"`
+	Jurisdiction    string         `json:"jurisdiction"`
+	DisplayName     string         `json:"display_name"`
+	RiskTier        string         `json:"risk_tier"`
+	Status          string         `json:"status"`
+	Visibility      string         `json:"visibility"`
+	OwnerPrincipal  *string        `json:"owner_principal_id"`
+	PublishedAt     string         `json:"published_at"`
+	PublishedBy     *string        `json:"published_by"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	Raw             map[string]any `json:"-"`
+}
+
+type TemplateAdminGetResponse struct {
+	RequestID       string                  `json:"request_id"`
+	Admin           string                  `json:"admin"`
+	Template        map[string]any          `json:"template"`
+	TemplateGates   map[string]string       `json:"template_gates"`
+	Variables       []TemplateVariableInput `json:"variables"`
+	ProtectedSlots  []string                `json:"protected_slots"`
+	ProhibitedSlots []string                `json:"prohibited_slots"`
+	Raw             map[string]any          `json:"-"`
+}
+
+type TemplateAdminListFilter struct {
+	Status           string
+	Visibility       string
+	OwnerPrincipalID string
+	ContractType     string
+	Jurisdiction     string
+}
+
+type TemplateAdminListResponse struct {
+	RequestID string                  `json:"request_id"`
+	Admin     string                  `json:"admin"`
+	Templates []TemplateAdminTemplate `json:"templates"`
+	Raw       map[string]any          `json:"-"`
+}
+
+type TemplateAdminCloneRequest struct {
+	TemplateID      string         `json:"template_id"`
+	TemplateVersion string         `json:"template_version,omitempty"`
+	DisplayName     string         `json:"display_name,omitempty"`
+	Visibility      string         `json:"visibility,omitempty"`
+	OwnerPrincipal  *string        `json:"owner_principal_id,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+}
+
+type TemplateAdminCloneResponse struct {
+	RequestID        string         `json:"request_id"`
+	TemplateID       string         `json:"template_id"`
+	TemplateVersion  string         `json:"template_version"`
+	Status           string         `json:"status"`
+	SourceTemplateID string         `json:"source_template_id"`
+	Raw              map[string]any `json:"-"`
+}
+
+type TemplateShareRequest struct {
+	PrincipalID string `json:"principal_id"`
+}
+
+type TemplateSharesResponse struct {
+	RequestID  string           `json:"request_id"`
+	Admin      string           `json:"admin"`
+	TemplateID string           `json:"template_id"`
+	Visibility string           `json:"visibility"`
+	Shares     []map[string]any `json:"shares"`
+	Raw        map[string]any   `json:"-"`
 }
 
 type ResolveOptions struct {
@@ -540,6 +638,120 @@ func (c *Client) RenderTemplate(ctx context.Context, templateID, version string,
 	return c.do(ctx, http.MethodPost, path, body, nil, true)
 }
 
+func (c *Client) CreateTemplate(ctx context.Context, req TemplateAdminUpsertRequest, idempotencyKey string) (map[string]any, error) {
+	return c.do(ctx, http.MethodPost, "/cel/admin/templates", req, idempotencyHeaders(idempotencyKey), true)
+}
+
+func (c *Client) UpdateTemplate(ctx context.Context, templateID string, req TemplateAdminUpsertRequest, idempotencyKey string) (map[string]any, error) {
+	return c.do(ctx, http.MethodPut, "/cel/admin/templates/"+url.PathEscape(templateID), req, idempotencyHeaders(idempotencyKey), true)
+}
+
+func (c *Client) PublishTemplate(ctx context.Context, templateID, idempotencyKey string) (map[string]any, error) {
+	return c.do(ctx, http.MethodPost, "/cel/admin/templates/"+url.PathEscape(templateID)+":publish", map[string]any{}, idempotencyHeaders(idempotencyKey), true)
+}
+
+func (c *Client) ArchiveTemplate(ctx context.Context, templateID, idempotencyKey string) (map[string]any, error) {
+	return c.do(ctx, http.MethodPost, "/cel/admin/templates/"+url.PathEscape(templateID)+":archive", map[string]any{}, idempotencyHeaders(idempotencyKey), true)
+}
+
+func (c *Client) CloneTemplate(ctx context.Context, templateID string, req TemplateAdminCloneRequest, idempotencyKey string) (*TemplateAdminCloneResponse, error) {
+	raw, err := c.do(ctx, http.MethodPost, "/cel/admin/templates/"+url.PathEscape(templateID)+":clone", req, idempotencyHeaders(idempotencyKey), true)
+	if err != nil {
+		return nil, err
+	}
+	out := &TemplateAdminCloneResponse{Raw: raw}
+	out.RequestID, _ = raw["request_id"].(string)
+	out.TemplateID, _ = raw["template_id"].(string)
+	out.TemplateVersion, _ = raw["template_version"].(string)
+	out.Status, _ = raw["status"].(string)
+	out.SourceTemplateID, _ = raw["source_template_id"].(string)
+	return out, nil
+}
+
+func (c *Client) GetTemplateAdmin(ctx context.Context, templateID string) (*TemplateAdminGetResponse, error) {
+	raw, err := c.do(ctx, http.MethodGet, "/cel/admin/templates/"+url.PathEscape(templateID), nil, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	out := &TemplateAdminGetResponse{Raw: raw}
+	out.RequestID, _ = raw["request_id"].(string)
+	out.Admin, _ = raw["admin"].(string)
+	out.Template, _ = raw["template"].(map[string]any)
+	out.TemplateGates = toStringMap(raw["template_gates"])
+	out.Variables = toTemplateVariableInputs(raw["variables"])
+	out.ProtectedSlots = toStringSlice(raw["protected_slots"])
+	out.ProhibitedSlots = toStringSlice(raw["prohibited_slots"])
+	return out, nil
+}
+
+func (c *Client) ListTemplatesAdmin(ctx context.Context, filter TemplateAdminListFilter) (*TemplateAdminListResponse, error) {
+	v := url.Values{}
+	if strings.TrimSpace(filter.Status) != "" {
+		v.Set("status", filter.Status)
+	}
+	if strings.TrimSpace(filter.Visibility) != "" {
+		v.Set("visibility", filter.Visibility)
+	}
+	if strings.TrimSpace(filter.OwnerPrincipalID) != "" {
+		v.Set("owner_principal_id", filter.OwnerPrincipalID)
+	}
+	if strings.TrimSpace(filter.ContractType) != "" {
+		v.Set("contract_type", filter.ContractType)
+	}
+	if strings.TrimSpace(filter.Jurisdiction) != "" {
+		v.Set("jurisdiction", filter.Jurisdiction)
+	}
+	path := "/cel/admin/templates"
+	if enc := v.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	raw, err := c.do(ctx, http.MethodGet, path, nil, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	out := &TemplateAdminListResponse{Raw: raw}
+	out.RequestID, _ = raw["request_id"].(string)
+	out.Admin, _ = raw["admin"].(string)
+	if arr, ok := raw["templates"].([]any); ok {
+		out.Templates = make([]TemplateAdminTemplate, 0, len(arr))
+		for _, item := range arr {
+			if m, ok := item.(map[string]any); ok {
+				out.Templates = append(out.Templates, parseTemplateAdminTemplate(m))
+			}
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) ListTemplateShares(ctx context.Context, templateID string) (*TemplateSharesResponse, error) {
+	raw, err := c.do(ctx, http.MethodGet, "/cel/admin/templates/"+url.PathEscape(templateID)+"/shares", nil, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	out := &TemplateSharesResponse{Raw: raw}
+	out.RequestID, _ = raw["request_id"].(string)
+	out.Admin, _ = raw["admin"].(string)
+	out.TemplateID, _ = raw["template_id"].(string)
+	out.Visibility, _ = raw["visibility"].(string)
+	if arr, ok := raw["shares"].([]any); ok {
+		out.Shares = make([]map[string]any, 0, len(arr))
+		for _, item := range arr {
+			if m, ok := item.(map[string]any); ok {
+				out.Shares = append(out.Shares, m)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) AddTemplateShare(ctx context.Context, templateID, principalID, idempotencyKey string) (map[string]any, error) {
+	return c.do(ctx, http.MethodPost, "/cel/admin/templates/"+url.PathEscape(templateID)+"/shares", TemplateShareRequest{PrincipalID: principalID}, idempotencyHeaders(idempotencyKey), true)
+}
+
+func (c *Client) RemoveTemplateShare(ctx context.Context, templateID, principalID, idempotencyKey string) (map[string]any, error) {
+	return c.do(ctx, http.MethodDelete, "/cel/admin/templates/"+url.PathEscape(templateID)+"/shares/"+url.PathEscape(principalID), nil, idempotencyHeaders(idempotencyKey), true)
+}
+
 func (c *Client) ApprovalDecide(ctx context.Context, approvalRequestID string, opts ApprovalDecideOptions) (*ApprovalDecisionResult, error) {
 	if strings.TrimSpace(approvalRequestID) == "" {
 		return nil, errors.New("approval_request_id is required")
@@ -701,7 +913,7 @@ func parseSDKError(status int, body []byte) error {
 	}
 	out.Message, _ = obj["message"].(string)
 	out.RequestID, _ = obj["request_id"].(string)
-	if d, ok := obj["details"].(map[string]any); ok {
+	if d, ok := obj["details"]; ok {
 		out.Details = d
 	}
 	if out.Message == "" {
@@ -727,6 +939,89 @@ func containsString(xs []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func idempotencyHeaders(idempotencyKey string) map[string]string {
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return nil
+	}
+	return map[string]string{"Idempotency-Key": strings.TrimSpace(idempotencyKey)}
+}
+
+func toStringSlice(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func toStringMap(v any) map[string]string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, vv := range m {
+		if s, ok := vv.(string); ok {
+			out[k] = s
+		}
+	}
+	return out
+}
+
+func toTemplateVariableInputs(v any) []TemplateVariableInput {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]TemplateVariableInput, 0, len(arr))
+	for _, item := range arr {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		in := TemplateVariableInput{}
+		in.Key, _ = m["key"].(string)
+		in.Type, _ = m["type"].(string)
+		in.Required, _ = m["required"].(bool)
+		in.Sensitivity, _ = m["sensitivity"].(string)
+		in.SetPolicy, _ = m["set_policy"].(string)
+		if c, ok := m["constraints"].(map[string]any); ok {
+			in.Constraints = c
+		}
+		out = append(out, in)
+	}
+	return out
+}
+
+func parseTemplateAdminTemplate(raw map[string]any) TemplateAdminTemplate {
+	tpl := TemplateAdminTemplate{Raw: raw}
+	tpl.TemplateID, _ = raw["template_id"].(string)
+	tpl.TemplateVersion, _ = raw["template_version"].(string)
+	tpl.ContractType, _ = raw["contract_type"].(string)
+	tpl.Jurisdiction, _ = raw["jurisdiction"].(string)
+	tpl.DisplayName, _ = raw["display_name"].(string)
+	tpl.RiskTier, _ = raw["risk_tier"].(string)
+	tpl.Status, _ = raw["status"].(string)
+	tpl.Visibility, _ = raw["visibility"].(string)
+	tpl.PublishedAt, _ = raw["published_at"].(string)
+	if owner, ok := raw["owner_principal_id"].(string); ok && strings.TrimSpace(owner) != "" {
+		tpl.OwnerPrincipal = &owner
+	}
+	if pubBy, ok := raw["published_by"].(string); ok && strings.TrimSpace(pubBy) != "" {
+		tpl.PublishedBy = &pubBy
+	}
+	if md, ok := raw["metadata"].(map[string]any); ok {
+		tpl.Metadata = md
+	}
+	return tpl
 }
 
 func parseGateResult(raw map[string]any) *GateResult {

@@ -69,6 +69,21 @@ For exact hosted request/response examples (signup -> template -> contract -> ac
 
 - `docs/HOSTED_AGENT_JOURNEY.md`
 
+## Optional Operator Path: Template Admin via SDK
+
+If you are operating a hosted node (admin path), SDKs now expose template authoring wrappers for:
+
+- create/update/publish/archive/clone templates
+- list templates with admin filters
+- add/remove PRIVATE template shares for principal access
+
+Use deterministic idempotency keys on mutating calls and handle `422 TEMPLATE_LINT_FAILED` by surfacing `error.details[]` to the authoring UI/logs.
+
+Full authoring lifecycle and lint catalog:
+
+- `docs/TEMPLATE_AUTHORING.md`
+- `docs/TEMPLATE_LINT_ERRORS.md`
+
 ## Optional Hosted Commerce
 
 - `POST /commerce/intents` (context `commerce-intent`)

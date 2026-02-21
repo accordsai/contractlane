@@ -59,6 +59,32 @@ Template creation/edit/publish is an operator/admin workflow (not a standard end
 - `docs/TEMPLATE_AUTHORING.md`
 - `docs/TEMPLATE_LINT_ERRORS.md` (deterministic `422 TEMPLATE_LINT_FAILED` catalog)
 
+SDK operator/admin wrappers are available for this workflow:
+
+- Go: `CreateTemplate`, `UpdateTemplate`, `PublishTemplate`, `ArchiveTemplate`, `CloneTemplate`, `ListTemplatesAdmin`, `ListTemplateShares`, `AddTemplateShare`, `RemoveTemplateShare`
+- Python: `create_template`, `update_template`, `publish_template`, `archive_template`, `clone_template`, `list_templates_admin`, `list_template_shares`, `add_template_share`, `remove_template_share`
+- TypeScript: `createTemplate`, `updateTemplate`, `publishTemplate`, `archiveTemplate`, `cloneTemplate`, `listTemplatesAdmin`, `listTemplateShares`, `addTemplateShare`, `removeTemplateShare`
+
+Example (private template + publish + share):
+
+```text
+1) create template in DRAFT (visibility=PRIVATE)
+2) publish template after lint-clean payload
+3) share template to principal_id when needed
+```
+
+Lint failures are deterministic and include details:
+
+```json
+{
+  "error": {
+    "code": "TEMPLATE_LINT_FAILED",
+    "message": "template validation failed",
+    "details": [{ "path": "variables[0].key", "code": "FORMAT_INVALID", "message": "..." }]
+  }
+}
+```
+
 ## SDK Contract Creation Snippets
 
 Go:

@@ -276,6 +276,116 @@ func TestCreateContract_ErrorMapping(t *testing.T) {
 	}
 }
 
+func TestTemplateAdmin_CreateTemplate_RequestAndLintErrorMapping(t *testing.T) {
+	var gotPath string
+	var gotIdem string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotIdem = r.Header.Get("Idempotency-Key")
+		defer r.Body.Close()
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(422)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":    "TEMPLATE_LINT_FAILED",
+				"message": "template validation failed",
+				"details": []any{
+					map[string]any{
+						"path":    "variables[0].key",
+						"code":    "FORMAT_INVALID",
+						"message": "invalid variable key format: Bad-Key",
+					},
+				},
+			},
+			"request_id": "req_lint_1",
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, PrincipalAuth{Token: "tok"})
+	_, err := c.CreateTemplate(context.Background(), TemplateAdminUpsertRequest{
+		TemplateID:      "tpl_private_demo",
+		TemplateVersion: "v1",
+		ContractType:    "NDA",
+		Jurisdiction:    "US",
+		DisplayName:     "NDA private",
+		RiskTier:        "LOW",
+		Visibility:      "PRIVATE",
+		Variables: []TemplateVariableInput{
+			{Key: "Bad-Key", Type: "STRING", Required: true, Sensitivity: "NONE", SetPolicy: "AGENT_ALLOWED"},
+		},
+	}, "idem-create-1")
+	if err == nil {
+		t.Fatalf("expected lint error")
+	}
+	if gotPath != "/cel/admin/templates" {
+		t.Fatalf("unexpected path: %s", gotPath)
+	}
+	if gotIdem != "idem-create-1" {
+		t.Fatalf("unexpected idempotency key: %s", gotIdem)
+	}
+	if gotBody["template_id"] != "tpl_private_demo" {
+		t.Fatalf("unexpected template_id: %#v", gotBody["template_id"])
+	}
+	sdkErr, ok := err.(*Error)
+	if !ok {
+		t.Fatalf("expected *Error, got %T", err)
+	}
+	if sdkErr.StatusCode != 422 || sdkErr.ErrorCode != "TEMPLATE_LINT_FAILED" {
+		t.Fatalf("unexpected error mapping: %#v", sdkErr)
+	}
+	if _, ok := sdkErr.Details.([]any); !ok {
+		t.Fatalf("expected lint details array, got %T", sdkErr.Details)
+	}
+}
+
+func TestTemplateAdmin_ListTemplatesAdmin_FilterEncoding(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"request_id": "req_1",
+			"admin":      "bootstrap",
+			"templates": []any{
+				map[string]any{
+					"template_id":      "tpl_1",
+					"template_version": "v1",
+					"contract_type":    "NDA",
+					"jurisdiction":     "US",
+					"display_name":     "NDA",
+					"risk_tier":        "LOW",
+					"status":           "PUBLISHED",
+					"visibility":       "GLOBAL",
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, PrincipalAuth{Token: "tok"})
+	resp, err := c.ListTemplatesAdmin(context.Background(), TemplateAdminListFilter{
+		Status:           "PUBLISHED",
+		Visibility:       "PRIVATE",
+		OwnerPrincipalID: "prn_1",
+		ContractType:     "NDA",
+		Jurisdiction:     "US",
+	})
+	if err != nil {
+		t.Fatalf("ListTemplatesAdmin: %v", err)
+	}
+	if !strings.Contains(gotQuery, "status=PUBLISHED") ||
+		!strings.Contains(gotQuery, "visibility=PRIVATE") ||
+		!strings.Contains(gotQuery, "owner_principal_id=prn_1") ||
+		!strings.Contains(gotQuery, "contract_type=NDA") ||
+		!strings.Contains(gotQuery, "jurisdiction=US") {
+		t.Fatalf("unexpected query encoding: %s", gotQuery)
+	}
+	if resp == nil || len(resp.Templates) != 1 || resp.Templates[0].TemplateID != "tpl_1" {
+		t.Fatalf("unexpected list response: %#v", resp)
+	}
+}
+
 func TestConformanceCasesExist(t *testing.T) {
 	_, filename, _, _ := runtime.Caller(0)
 	root := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", "..", ".."))
