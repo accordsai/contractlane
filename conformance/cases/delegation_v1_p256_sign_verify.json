@@ -1,0 +1,5 @@
+{
+  "name": "delegation_v1_p256_sign_verify",
+  "description": "Delegation sign/verify passes using sig-v2/es256 and agent-id-v2."
+}
+

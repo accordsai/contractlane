@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`sig-v1` defines an algorithm-neutral signature envelope for Contract Lane protocol messages.
+`sig-v1` defines the frozen Ed25519 signature envelope for Contract Lane protocol messages.
 
 It is used for approvals, delegations, settlement proofs, and any governed action requiring cryptographic attestation.
 
@@ -27,9 +27,9 @@ These rules must align with Contract Lane evidence canonicalization philosophy.
 Envelope is a JSON object with these required fields:
 
 - `version`: string, must equal `"sig-v1"`
-- `algorithm`: string, algorithm registry identifier
-- `public_key`: string, encoding depends on `algorithm`
-- `signature`: string, encoding depends on `algorithm`
+- `algorithm`: string, must equal `"ed25519"`
+- `public_key`: base64 encoded 32-byte Ed25519 public key
+- `signature`: base64 encoded 64-byte Ed25519 signature
 - `payload_hash`: lowercase hex SHA-256 of canonical payload bytes
 - `issued_at`: RFC3339Nano UTC timestamp
 
@@ -50,28 +50,18 @@ Optional fields:
 
 Verification must fail closed:
 
-1. Reject unsupported `algorithm`.
+1. Reject if `algorithm` is not `"ed25519"`.
 2. Recompute canonical payload hash and reject if it does not equal `payload_hash`.
 3. Verify signature bytes using `algorithm` + `public_key`; reject if invalid.
 4. Reject if `issued_at` is missing or not valid RFC3339Nano UTC format.
 
-## Algorithm Registry (Initial)
+## Algorithm
 
 ### `ed25519`
 
 - `public_key`: base64, 32 bytes
 - `signature`: base64, 64 bytes
 
-### `secp256k1`
-
-- `public_key`: hex, 33-byte compressed key
-- `signature`: base64
-
-### `rsa-pss-sha256`
-
-- `public_key`: base64 DER SPKI
-- `signature`: base64
-
 ## Backwards Compatibility
 
-Existing internal signature formats may continue to be accepted by implementation-specific paths, but protocol v1 signing going forward is `sig-v1`.
+`sig-v1` remains unchanged for existing clients. P-256 is introduced additively via `sig-v2` (`docs/SIG_V2.md`).

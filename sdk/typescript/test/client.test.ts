@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { generateKeyPairSync } from 'node:crypto';
 import nacl from 'tweetnacl';
-import { ContractLaneClient, PrincipalAuth, AgentHmacAuth, IncompatibleNodeError, buildSignatureEnvelopeV1, canonicalSha256Hex, canonicalize, sha256Hex, parseSigV1, agentIdFromPublicKey, parseAgentId, isValidAgentId, hashCommerceIntentV1, signCommerceIntentV1, verifyCommerceIntentV1, hashCommerceAcceptV1, signCommerceAcceptV1, verifyCommerceAcceptV1, hashDelegationV1, signDelegationV1, verifyDelegationV1, evaluateDelegationConstraints, parseDelegationRevocationV1, computeProofId, verifyProofBundleV1 } from '../src/index.ts';
+import { ContractLaneClient, PrincipalAuth, AgentHmacAuth, IncompatibleNodeError, buildSignatureEnvelopeV1, canonicalSha256Hex, canonicalize, sha256Hex, parseSigV1, parseSigV2, agentIdFromPublicKey, agentIdV2FromP256PublicKey, parseAgentId, isValidAgentId, hashCommerceIntentV1, signCommerceIntentV1, signCommerceIntentV1ES256, verifyCommerceIntentV1, hashCommerceAcceptV1, signCommerceAcceptV1, verifyCommerceAcceptV1, hashDelegationV1, signDelegationV1, signDelegationV1ES256, verifyDelegationV1, evaluateDelegationConstraints, parseDelegationRevocationV1, computeProofId, verifyProofBundleV1 } from '../src/index.ts';
 
 test('gateResolve requires idempotency key', async () => {
   const client = new ContractLaneClient({ baseUrl: 'http://example.com', auth: new PrincipalAuth('tok'), fetchFn: async () => new Response('{}', { status: 200 }) as any });
@@ -167,6 +168,11 @@ test('conformance cases exist', () => {
     'error_model_401.json',
     'retry_429_then_success.json',
     'sig_v1_approval_happy_path.json',
+    'sig_v2_approval_happy_path.json',
+    'sig_v2_approval_bad_signature.json',
+    'delegation_v1_p256_sign_verify.json',
+    'mixed_signers_ed25519_p256_verify.json',
+    'sig_v2_invalid_encoding_rejects.json',
     'evidence_contains_anchors_and_receipts.json',
     'evp_verify_bundle_good.json',
     'agent_id_v1_roundtrip.json',
@@ -219,6 +225,24 @@ test('agent-id-v1 conformance fixture', () => {
   }
 });
 
+test('agent-id-v2 p256 roundtrip and malformed point rejection', () => {
+  const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const sec1 = privateKey.export({ format: 'jwk' }) as any;
+  const x = Buffer.from(sec1.x, 'base64url');
+  const y = Buffer.from(sec1.y, 'base64url');
+  const pub = Buffer.concat([Buffer.from([0x04]), x, y]);
+  const id = agentIdV2FromP256PublicKey(pub);
+  const parsed = parseAgentId(id);
+  assert.equal(parsed.algo, 'p256');
+  assert.deepEqual(Buffer.from(parsed.publicKey), pub);
+  assert.equal(isValidAgentId(id), true);
+
+  const offCurve = Buffer.concat([Buffer.from([0x04]), Buffer.alloc(31), Buffer.from([0x01]), Buffer.alloc(31), Buffer.from([0x01])]);
+  const bad = `agent:v2:pk:p256:${offCurve.toString('base64url')}`;
+  assert.throws(() => parseAgentId(bad));
+  assert.equal(isValidAgentId(bad), false);
+});
+
 function fixedIntent() {
   return {
     version: 'commerce-intent-v1' as const,
@@ -259,6 +283,15 @@ test('commerce-accept-v1 known vector hash', () => {
 test('commerce-intent-v1 sign and verify', () => {
   const keyPair = nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(11));
   const sig = signCommerceIntentV1(fixedIntent(), keyPair.secretKey, new Date('2026-02-20T11:00:00Z'));
+  assert.equal(sig.context, 'commerce-intent');
+  assert.doesNotThrow(() => verifyCommerceIntentV1(fixedIntent(), sig));
+});
+
+test('commerce-intent-v1 es256 sign and verify', () => {
+  const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const sig = signCommerceIntentV1ES256(fixedIntent(), privateKey, new Date('2026-02-20T11:00:00Z'));
+  assert.equal(sig.version, 'sig-v2');
+  assert.equal(sig.algorithm, 'es256');
   assert.equal(sig.context, 'commerce-intent');
   assert.doesNotThrow(() => verifyCommerceIntentV1(fixedIntent(), sig));
 });
@@ -312,6 +345,18 @@ test('delegation-v1 sign and verify', () => {
   assert.doesNotThrow(() => verifyDelegationV1(fixedDelegation(), sig));
   const bad = { ...sig, context: 'commerce-intent' };
   assert.throws(() => verifyDelegationV1(fixedDelegation(), bad as any));
+});
+
+test('delegation-v1 es256 sign and verify', () => {
+  const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const jwk = privateKey.export({ format: 'jwk' }) as any;
+  const p256Pub = Buffer.concat([Buffer.from([0x04]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]);
+  const issuer = agentIdV2FromP256PublicKey(p256Pub);
+  const payload = { ...fixedDelegation(), issuer_agent: issuer, subject_agent: issuer };
+  const sig = signDelegationV1ES256(payload, privateKey, new Date('2026-02-20T12:06:00Z'));
+  assert.equal(sig.version, 'sig-v2');
+  assert.equal(sig.algorithm, 'es256');
+  assert.doesNotThrow(() => verifyDelegationV1(payload, sig));
 });
 
 test('delegation constraints evaluation', () => {
@@ -371,6 +416,13 @@ test('parseSigV1 rejects non-UTC timestamps', () => {
       issued_at: '2026-01-01T00:00:00+01:00',
     } as any),
   );
+});
+
+test('parseSigV2 rejects malformed p256 public key', () => {
+  const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const sig = signCommerceIntentV1ES256(fixedIntent(), privateKey, new Date('2026-02-20T11:00:00Z'));
+  const offCurve = Buffer.concat([Buffer.from([0x04]), Buffer.alloc(31), Buffer.from([0x01]), Buffer.alloc(31), Buffer.from([0x01])]);
+  assert.throws(() => parseSigV2({ ...sig, public_key: offCurve.toString('base64url') } as any));
 });
 
 test('parseDelegationRevocationV1 rejects unknown key', () => {
@@ -471,6 +523,63 @@ test('approvalDecide sig-v1 default path passes with valid capabilities', async 
     signed_payload: { contract_id: 'ctr_1', approval_request_id: 'aprq_1', nonce: 'n1' },
   }));
   assert.equal(decideHits, 1);
+});
+
+test('approvalDecide sig-v2 default path passes with valid capabilities', async () => {
+  const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  let decideHits = 0;
+  const fetchFn: typeof fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith('/cel/.well-known/contractlane')) {
+      return new Response(JSON.stringify({
+        protocol: { name: 'contractlane', versions: ['v1'] },
+        evidence: { bundle_versions: ['evidence-v1'], always_present_artifacts: ['anchors', 'webhook_receipts'] },
+        signatures: { envelopes: ['sig-v1', 'sig-v2'], algorithms: ['ed25519', 'es256'] },
+      }), { status: 200 }) as any;
+    }
+    decideHits++;
+    return new Response(JSON.stringify({ approval_request_id: 'aprq_1', status: 'APPROVED' }), { status: 200 }) as any;
+  };
+  const client = new ContractLaneClient({ baseUrl: 'http://example.com', auth: new PrincipalAuth('tok'), fetchFn });
+  client.setSigningKeyES256(privateKey);
+
+  await assert.doesNotReject(async () => client.approvalDecide('aprq_1', {
+    actor_context: { principal_id: 'prn_1', actor_id: 'act_1', actor_type: 'HUMAN' },
+    decision: 'APPROVE',
+    signed_payload: { contract_id: 'ctr_1', approval_request_id: 'aprq_1', nonce: 'n1' },
+  }));
+  assert.equal(decideHits, 1);
+});
+
+test('approvalDecide sig-v2 default path throws IncompatibleNodeError when sig-v2 missing', async () => {
+  const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const fetchFn: typeof fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith('/cel/.well-known/contractlane')) {
+      return new Response(JSON.stringify({
+        protocol: { name: 'contractlane', versions: ['v1'] },
+        evidence: { bundle_versions: ['evidence-v1'], always_present_artifacts: ['anchors', 'webhook_receipts'] },
+        signatures: { envelopes: ['sig-v1'], algorithms: ['ed25519'] },
+      }), { status: 200 }) as any;
+    }
+    return new Response(JSON.stringify({ approval_request_id: 'aprq_1', status: 'APPROVED' }), { status: 200 }) as any;
+  };
+  const client = new ContractLaneClient({ baseUrl: 'http://example.com', auth: new PrincipalAuth('tok'), fetchFn });
+  client.setSigningKeyES256(privateKey);
+
+  await assert.rejects(
+    async () => client.approvalDecide('aprq_1', {
+      actor_context: { principal_id: 'prn_1', actor_id: 'act_1', actor_type: 'HUMAN' },
+      decision: 'APPROVE',
+      signed_payload: { contract_id: 'ctr_1', approval_request_id: 'aprq_1', nonce: 'n1' },
+    }),
+    (err: any) => {
+      assert.ok(err instanceof IncompatibleNodeError);
+      assert.ok(Array.isArray(err.missing));
+      assert.ok(err.missing.includes('signatures.envelopes:sig-v2'));
+      return true;
+    },
+  );
 });
 
 test('approvalDecide sig-v1 default path throws IncompatibleNodeError when sig-v1 missing', async () => {

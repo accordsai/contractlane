@@ -2,6 +2,7 @@ package contractlane
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -77,6 +78,46 @@ func ParseSigV1EnvelopeV1Strict(v any) (SignatureEnvelopeV1, error) {
 	}
 	if err := validateRFC3339UTC(out.IssuedAt, "issued_at"); err != nil {
 		return SignatureEnvelopeV1{}, err
+	}
+	return out, nil
+}
+
+func ParseSigV2EnvelopeV2Strict(v any) (SignatureEnvelopeV2, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return SignatureEnvelopeV2{}, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	var out SignatureEnvelopeV2
+	if err := dec.Decode(&out); err != nil {
+		return SignatureEnvelopeV2{}, err
+	}
+	if dec.More() {
+		return SignatureEnvelopeV2{}, errors.New("invalid trailing signature payload")
+	}
+	if out.Version != "sig-v2" {
+		return SignatureEnvelopeV2{}, errors.New("version must be sig-v2")
+	}
+	if out.Algorithm != "es256" {
+		return SignatureEnvelopeV2{}, errors.New("algorithm must be es256")
+	}
+	if len(out.PayloadHash) != 64 || strings.ToLower(out.PayloadHash) != out.PayloadHash {
+		return SignatureEnvelopeV2{}, errors.New("payload_hash must be lowercase hex sha256")
+	}
+	if _, err := hex.DecodeString(out.PayloadHash); err != nil {
+		return SignatureEnvelopeV2{}, errors.New("payload_hash must be lowercase hex sha256")
+	}
+	if err := validateRFC3339UTC(out.IssuedAt, "issued_at"); err != nil {
+		return SignatureEnvelopeV2{}, err
+	}
+	if _, err := decodeBase64URLNoPadding(out.PublicKey, "signature public key"); err != nil {
+		return SignatureEnvelopeV2{}, err
+	}
+	if _, err := decodeBase64URLNoPadding(out.Signature, "signature"); err != nil {
+		// DER compatibility input is allowed at verifier boundaries, but strict parser
+		// enforces canonical raw64 base64url encoding for new payloads.
+		return SignatureEnvelopeV2{}, err
 	}
 	return out, nil
 }
@@ -162,6 +203,25 @@ func SigV1Sign(context string, payloadHashHex string, priv ed25519.PrivateKey, i
 	}
 	if err := validateRFC3339UTC(env.IssuedAt, "issued_at"); err != nil {
 		return SignatureEnvelopeV1{}, err
+	}
+	return env, nil
+}
+
+func SigV2Sign(context string, payloadHashHex string, priv *ecdsa.PrivateKey, issuedAt time.Time, keyID string) (SignatureEnvelopeV2, error) {
+	if len(payloadHashHex) != 64 || strings.ToLower(payloadHashHex) != payloadHashHex {
+		return SignatureEnvelopeV2{}, errors.New("payload_hash must be lowercase hex sha256")
+	}
+	hashBytes, err := hex.DecodeString(payloadHashHex)
+	if err != nil {
+		return SignatureEnvelopeV2{}, errors.New("payload_hash must be lowercase hex sha256")
+	}
+	env, err := SignES256Prehashed(priv, hashBytes, issuedAt, strings.TrimSpace(context))
+	if err != nil {
+		return SignatureEnvelopeV2{}, err
+	}
+	env.PayloadHash = payloadHashHex
+	if strings.TrimSpace(keyID) != "" {
+		env.KeyID = strings.TrimSpace(keyID)
 	}
 	return env, nil
 }

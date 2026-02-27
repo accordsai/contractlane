@@ -9,7 +9,9 @@
     "protocol_versions_contains": "v1",
     "evidence_bundle_versions_contains": "evidence-v1",
     "signatures_envelopes_contains": "sig-v1",
+    "signatures_envelopes_also_contains": "sig-v2",
     "signatures_algorithms_contains": "ed25519",
+    "signatures_algorithms_also_contains": "es256",
     "always_present_artifacts_contains": [
       "anchors",
       "webhook_receipts"

@@ -1,3 +1,4 @@
+import { KeyObject } from 'crypto';
 export declare const API_VERSION = "v1";
 export type RetryConfig = {
     maxAttempts?: number;
@@ -50,6 +51,70 @@ export type CreateContractInput = {
 };
 export type CreateContractResponse = {
     contract?: Record<string, unknown>;
+    raw: Record<string, unknown>;
+};
+export type TemplateVariableInput = {
+    key: string;
+    type: string;
+    required: boolean;
+    sensitivity: string;
+    set_policy: string;
+    constraints?: Record<string, unknown>;
+};
+export type TemplateAdminUpsertInput = {
+    template_id: string;
+    template_version: string;
+    contract_type: string;
+    jurisdiction: string;
+    display_name: string;
+    risk_tier: string;
+    visibility: string;
+    owner_principal_id?: string | null;
+    metadata?: Record<string, unknown>;
+    template_gates?: Record<string, string>;
+    protected_slots?: string[];
+    prohibited_slots?: string[];
+    variables?: TemplateVariableInput[];
+};
+export type TemplateAdminTemplate = {
+    template_id: string;
+    template_version: string;
+    contract_type?: string;
+    jurisdiction?: string;
+    display_name?: string;
+    risk_tier?: string;
+    status?: string;
+    visibility?: string;
+    owner_principal_id?: string | null;
+    metadata?: Record<string, unknown>;
+    published_at?: string;
+    published_by?: string | null;
+    [k: string]: unknown;
+};
+export type TemplateAdminListFilters = {
+    status?: string;
+    visibility?: string;
+    owner_principal_id?: string;
+    contract_type?: string;
+    jurisdiction?: string;
+};
+export type TemplateAdminCloneInput = {
+    template_id: string;
+    template_version?: string;
+    display_name?: string;
+    visibility?: string;
+    owner_principal_id?: string | null;
+    metadata?: Record<string, unknown>;
+};
+export type TemplateShareRequest = {
+    principal_id: string;
+};
+export type TemplateSharesResponse = {
+    request_id?: string;
+    admin?: string;
+    template_id?: string;
+    visibility?: string;
+    shares?: Record<string, unknown>[];
     raw: Record<string, unknown>;
 };
 export type Evidence = Record<string, unknown>;
@@ -112,6 +177,17 @@ export type SignatureEnvelopeV1 = {
     context?: string;
     key_id?: string;
 };
+export type SignatureEnvelopeV2 = {
+    version: 'sig-v2';
+    algorithm: 'es256';
+    public_key: string;
+    signature: string;
+    payload_hash: string;
+    issued_at: string;
+    context?: string;
+    key_id?: string;
+};
+export type SignatureEnvelope = SignatureEnvelopeV1 | SignatureEnvelopeV2;
 export type DelegationRevocationV1 = {
     version: 'delegation-revocation-v1';
     revocation_id: string;
@@ -148,7 +224,7 @@ export type ApprovalDecideInput = {
     signed_payload: Record<string, unknown>;
     signed_payload_hash?: string;
     signature?: Record<string, unknown>;
-    signature_envelope?: SignatureEnvelopeV1;
+    signature_envelope?: SignatureEnvelope;
 };
 export type ContractRender = {
     contract_id: string;
@@ -200,13 +276,13 @@ export declare class ContractLaneError extends Error {
     status_code: number;
     error_code?: string;
     request_id?: string;
-    details?: Record<string, unknown>;
+    details?: unknown;
     constructor(init: {
         status_code: number;
         error_code?: string;
         message: string;
         request_id?: string;
-        details?: Record<string, unknown>;
+        details?: unknown;
     });
 }
 export interface AuthStrategy {
@@ -250,7 +326,8 @@ export declare class ContractLaneClient {
     private headers;
     private userAgentSuffix?;
     private fetchFn;
-    private signingKey?;
+    private signingKeyEd25519?;
+    private signingKeyES256?;
     private signingContext;
     private keyId?;
     private disableCapabilityCheck;
@@ -277,16 +354,43 @@ export declare class ContractLaneClient {
         format?: 'text' | 'html';
         locale?: string;
     }): Promise<TemplateRender>;
+    createTemplate(input: TemplateAdminUpsertInput, opts?: {
+        idempotencyKey?: string;
+    }): Promise<Record<string, unknown>>;
+    updateTemplate(templateId: string, input: TemplateAdminUpsertInput, opts?: {
+        idempotencyKey?: string;
+    }): Promise<Record<string, unknown>>;
+    publishTemplate(templateId: string, opts?: {
+        idempotencyKey?: string;
+    }): Promise<Record<string, unknown>>;
+    archiveTemplate(templateId: string, opts?: {
+        idempotencyKey?: string;
+    }): Promise<Record<string, unknown>>;
+    cloneTemplate(templateId: string, input: TemplateAdminCloneInput, opts?: {
+        idempotencyKey?: string;
+    }): Promise<Record<string, unknown>>;
+    getTemplateAdmin(templateId: string): Promise<Record<string, unknown>>;
+    listTemplatesAdmin(filters?: TemplateAdminListFilters): Promise<Record<string, unknown>>;
+    listTemplateShares(templateId: string): Promise<TemplateSharesResponse>;
+    addTemplateShare(templateId: string, principalId: string, opts?: {
+        idempotencyKey?: string;
+    }): Promise<Record<string, unknown>>;
+    removeTemplateShare(templateId: string, principalId: string, opts?: {
+        idempotencyKey?: string;
+    }): Promise<Record<string, unknown>>;
     setSigningKeyEd25519(secretKey: Uint8Array, keyId?: string): void;
+    setSigningKeyES256(privateKey: string | Buffer | KeyObject, keyId?: string): void;
     setSigningContext(context: string): void;
     fetchCapabilities(): Promise<Capabilities>;
     requireProtocolV1(): Promise<void>;
+    requireProtocolV2ES256(): Promise<void>;
     approvalDecide(approvalRequestId: string, input: ApprovalDecideInput): Promise<Record<string, unknown>>;
     private parseGate;
     private request;
     private retryDelayMs;
     private sleep;
     private toError;
+    private idempotencyHeaders;
 }
 export declare function stableStringify(obj: any): string;
 export declare function canonicalSha256Hex(obj: any): string;
@@ -295,12 +399,15 @@ export declare function sha256Hex(data: Uint8Array | Buffer | string): string;
 export declare function hexToBytes(hex: string): Uint8Array;
 export declare function bytesToBase64(bytes: Uint8Array): string;
 export declare function agentIdFromPublicKey(pub: Uint8Array): string;
+export declare function agentIdV2FromP256PublicKey(pub: Uint8Array): string;
 export declare function parseAgentId(id: string): {
     algo: string;
     publicKey: Uint8Array;
 };
 export declare function isValidAgentId(id: string): boolean;
 export declare function parseSigV1(sig: SignatureEnvelopeV1, expectedContext?: string): SignatureEnvelopeV1;
+export declare function parseSigV2(sig: SignatureEnvelopeV2, expectedContext?: string): SignatureEnvelopeV2;
+export declare function parseSignatureEnvelope(sig: SignatureEnvelope, expectedContext?: string): SignatureEnvelope;
 export declare function normalizeAmountV1(currency: string, minorUnits: number): CommerceAmountV1;
 export declare function parseAmountV1(amount: CommerceAmountV1): bigint;
 export declare function parseDelegationV1(payload: DelegationV1): DelegationV1;
@@ -314,12 +421,14 @@ export declare function newCommerceAcceptV1(payload: Omit<CommerceAcceptV1, 'ver
 export declare function newDelegationV1(payload: Omit<DelegationV1, 'version' | 'nonce'>): DelegationV1;
 export declare function newDelegationRevocationV1(payload: Omit<DelegationRevocationV1, 'version' | 'nonce'>): DelegationRevocationV1;
 export declare function sigV1Sign(context: string, payloadHash: string, secretKey: Uint8Array, issuedAt: Date, keyId?: string): SignatureEnvelopeV1;
+export declare function sigV2Sign(context: string, payloadHash: string, privateKey: string | Buffer | KeyObject, issuedAt: Date, keyId?: string): SignatureEnvelopeV2;
 export declare function parseProofBundleV1(proof: any): ProofBundleV1;
 export declare function computeProofId(proof: ProofBundleV1): string;
 export declare function verifyProofBundleV1(proof: ProofBundleV1): VerifyReport;
 export declare function hashDelegationV1(payload: DelegationV1): string;
 export declare function signDelegationV1(payload: DelegationV1, secretKey: Uint8Array, issuedAt: Date): SignatureEnvelopeV1;
-export declare function verifyDelegationV1(payload: DelegationV1, sig: SignatureEnvelopeV1): void;
+export declare function signDelegationV1ES256(payload: DelegationV1, privateKey: string | Buffer | KeyObject, issuedAt: Date): SignatureEnvelopeV2;
+export declare function verifyDelegationV1(payload: DelegationV1, sig: SignatureEnvelope): void;
 export declare function evaluateDelegationConstraints(constraints: DelegationConstraintsV1, evalCtx: {
     contract_id: string;
     counterparty_agent: string;
@@ -328,8 +437,11 @@ export declare function evaluateDelegationConstraints(constraints: DelegationCon
 }): void;
 export declare function hashCommerceIntentV1(intent: CommerceIntentV1): string;
 export declare function signCommerceIntentV1(intent: CommerceIntentV1, secretKey: Uint8Array, issuedAt: Date): SignatureEnvelopeV1;
-export declare function verifyCommerceIntentV1(intent: CommerceIntentV1, sig: SignatureEnvelopeV1): void;
+export declare function signCommerceIntentV1ES256(intent: CommerceIntentV1, privateKey: string | Buffer | KeyObject, issuedAt: Date): SignatureEnvelopeV2;
+export declare function verifyCommerceIntentV1(intent: CommerceIntentV1, sig: SignatureEnvelope): void;
 export declare function hashCommerceAcceptV1(acc: CommerceAcceptV1): string;
 export declare function signCommerceAcceptV1(acc: CommerceAcceptV1, secretKey: Uint8Array, issuedAt: Date): SignatureEnvelopeV1;
-export declare function verifyCommerceAcceptV1(acc: CommerceAcceptV1, sig: SignatureEnvelopeV1): void;
+export declare function signCommerceAcceptV1ES256(acc: CommerceAcceptV1, privateKey: string | Buffer | KeyObject, issuedAt: Date): SignatureEnvelopeV2;
+export declare function verifyCommerceAcceptV1(acc: CommerceAcceptV1, sig: SignatureEnvelope): void;
 export declare function buildSignatureEnvelopeV1(payload: any, secretKey: Uint8Array, issuedAt: Date, context?: string, keyId?: string): SignatureEnvelopeV1;
+export declare function buildSignatureEnvelopeV2(payload: any, privateKey: string | Buffer | KeyObject, issuedAt: Date, context?: string, keyId?: string): SignatureEnvelopeV2;

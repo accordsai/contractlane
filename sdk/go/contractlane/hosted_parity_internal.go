@@ -1,14 +1,12 @@
 package contractlane
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
-	signaturev1 "github.com/accordsai/contractlane/pkg/signature"
 )
 
 type ValidatedCommerceIntentSubmission struct {
@@ -59,16 +57,7 @@ func ValidateCommerceIntentSubmission(intentPayload CommerceIntentV1, sig SigV1E
 	if sig.PayloadHash != hash {
 		return ValidatedCommerceIntentSubmission{}, errors.New("payload hash mismatch")
 	}
-	_, err = signaturev1.VerifyEnvelopeV1(commerceIntentPayload(n), signaturev1.EnvelopeV1{
-		Version:     sig.Version,
-		Algorithm:   sig.Algorithm,
-		PublicKey:   sig.PublicKey,
-		Signature:   sig.Signature,
-		PayloadHash: sig.PayloadHash,
-		IssuedAt:    sig.IssuedAt,
-		KeyID:       sig.KeyID,
-		Context:     sig.Context,
-	})
+	_, err = VerifySignatureEnvelope(commerceIntentPayload(n), sig)
 	if err != nil {
 		return ValidatedCommerceIntentSubmission{}, err
 	}
@@ -99,16 +88,7 @@ func ValidateCommerceAcceptSubmission(acceptPayload CommerceAcceptV1, sig SigV1E
 	if sig.PayloadHash != hash {
 		return ValidatedCommerceAcceptSubmission{}, errors.New("payload hash mismatch")
 	}
-	_, err = signaturev1.VerifyEnvelopeV1(commerceAcceptPayload(n), signaturev1.EnvelopeV1{
-		Version:     sig.Version,
-		Algorithm:   sig.Algorithm,
-		PublicKey:   sig.PublicKey,
-		Signature:   sig.Signature,
-		PayloadHash: sig.PayloadHash,
-		IssuedAt:    sig.IssuedAt,
-		KeyID:       sig.KeyID,
-		Context:     sig.Context,
-	})
+	_, err = VerifySignatureEnvelope(commerceAcceptPayload(n), sig)
 	if err != nil {
 		return ValidatedCommerceAcceptSubmission{}, err
 	}
@@ -312,11 +292,7 @@ func DeriveSettlementAttestations(receipts any) ([]SettlementAttestationV1, erro
 }
 
 func signingAgentFromEnvelope(sig SigV1Envelope) (string, error) {
-	pub, err := base64.StdEncoding.DecodeString(sig.PublicKey)
-	if err != nil {
-		return "", errors.New("invalid signature public_key encoding")
-	}
-	return AgentIDFromEd25519PublicKey(pub)
+	return AgentIDFromSignatureEnvelope(sig)
 }
 
 func validateCommerceIntentSubmission(intentPayload CommerceIntentV1, sig SigV1Envelope) (ValidatedCommerceIntentSubmission, error) {

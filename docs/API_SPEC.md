@@ -65,11 +65,11 @@
 - GET  /public/v1/signup/{session_id}
 - POST /public/v1/signup/complete
 
-## Approval Decide Payload (sig-v1 support)
+## Approval Decide Payload (signature envelope support)
 
 `POST /cel/approvals/{approval_request_id}:decide` accepts the existing fields and additionally supports:
 
-- `signature_envelope` (optional): `sig-v1` envelope object.
+- `signature_envelope` (optional): `sig-v1` or `sig-v2` envelope object.
 
 If `signature_envelope.context` is present, it must equal `"contract-action"`.
 
@@ -115,6 +115,11 @@ Routing is configured via `webhook_endpoints` records scoped by `(provider, endp
 ## Capability Discovery
 
 `GET /cel/.well-known/contractlane` advertises available protocol surfaces, including hosted commerce endpoints (`/commerce/intents`, `/commerce/accepts`) and proof export (`/cel/contracts/{id}/proof`).
+
+Signature capabilities are advertised in:
+
+- `signatures.envelopes` (for example `["sig-v1","sig-v2"]`)
+- `signatures.algorithms` (for example `["ed25519","es256"]`)
 
 Onboarding/public-signup routes are control-plane endpoints and may be operator-specific; they are not currently required protocol discovery fields in the CEL well-known response.
 

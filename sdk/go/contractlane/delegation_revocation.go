@@ -2,14 +2,12 @@ package contractlane
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"strings"
 	"time"
-
-	signaturev1 "github.com/accordsai/contractlane/pkg/signature"
 )
 
 type DelegationRevocationV1 struct {
@@ -24,7 +22,7 @@ type DelegationRevocationV1 struct {
 
 type SignedDelegationRevocationV1 struct {
 	Revocation      DelegationRevocationV1 `json:"revocation"`
-	IssuerSignature SigV1Envelope          `json:"issuer_signature"`
+	IssuerSignature SigEnvelope            `json:"issuer_signature"`
 }
 
 func ParseDelegationRevocationV1Strict(v any) (DelegationRevocationV1, error) {
@@ -60,7 +58,15 @@ func SignDelegationRevocationV1(payload DelegationRevocationV1, priv ed25519.Pri
 	return SignSigV1Ed25519(delegationRevocationPayloadMap(n), priv, issuedAt, "delegation-revocation")
 }
 
-func VerifyDelegationRevocationV1(payload DelegationRevocationV1, sig SigV1Envelope) error {
+func SignDelegationRevocationV1ES256(payload DelegationRevocationV1, priv *ecdsa.PrivateKey, issuedAt time.Time) (SigV2Envelope, error) {
+	n, err := normalizeDelegationRevocationV1(payload)
+	if err != nil {
+		return SigV2Envelope{}, err
+	}
+	return SignSigV2ES256(delegationRevocationPayloadMap(n), priv, issuedAt, "delegation-revocation")
+}
+
+func VerifyDelegationRevocationV1(payload DelegationRevocationV1, sig SigEnvelope) error {
 	n, err := normalizeDelegationRevocationV1(payload)
 	if err != nil {
 		return err
@@ -75,24 +81,11 @@ func VerifyDelegationRevocationV1(payload DelegationRevocationV1, sig SigV1Envel
 	if strings.TrimSpace(sig.PayloadHash) != hash {
 		return errors.New("payload hash mismatch")
 	}
-	_, err = signaturev1.VerifyEnvelopeV1(delegationRevocationPayloadMap(n), signaturev1.EnvelopeV1{
-		Version:     sig.Version,
-		Algorithm:   sig.Algorithm,
-		PublicKey:   sig.PublicKey,
-		Signature:   sig.Signature,
-		PayloadHash: sig.PayloadHash,
-		IssuedAt:    sig.IssuedAt,
-		KeyID:       sig.KeyID,
-		Context:     sig.Context,
-	})
+	_, err = VerifySignatureEnvelope(delegationRevocationPayloadMap(n), sig)
 	if err != nil {
 		return err
 	}
-	pub, err := base64.StdEncoding.DecodeString(sig.PublicKey)
-	if err != nil {
-		return errors.New("invalid signature public_key encoding")
-	}
-	issuerAgentID, err := AgentIDFromEd25519PublicKey(pub)
+	issuerAgentID, err := AgentIDFromSignatureEnvelope(sig)
 	if err != nil {
 		return err
 	}
@@ -102,7 +95,7 @@ func VerifyDelegationRevocationV1(payload DelegationRevocationV1, sig SigV1Envel
 	return nil
 }
 
-func ValidateDelegationRevocation(payload DelegationRevocationV1, signature SigV1Envelope) (revocationHash string, parsedRevocation DelegationRevocationV1, issuerAgent string, err error) {
+func ValidateDelegationRevocation(payload DelegationRevocationV1, signature SigEnvelope) (revocationHash string, parsedRevocation DelegationRevocationV1, issuerAgent string, err error) {
 	n, err := normalizeDelegationRevocationV1(payload)
 	if err != nil {
 		return "", DelegationRevocationV1{}, "", err

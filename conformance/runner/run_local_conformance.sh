@@ -40,6 +40,8 @@ required_cases=(
   error_model_401.json
   retry_429_then_success.json
   sig_v1_approval_happy_path.json
+  sig_v2_approval_happy_path.json
+  sig_v2_approval_bad_signature.json
   hosted_commerce_intent_roundtrip.json
   hosted_commerce_accept_roundtrip.json
   hosted_authorization_missing_delegation_intent.json
@@ -56,6 +58,9 @@ required_cases=(
   proof_bundle_v1_id_matches.json
   proof_bundle_v1_offline_verify_ok.json
   proof_bundle_v1_tamper_fails.json
+  delegation_v1_p256_sign_verify.json
+  mixed_signers_ed25519_p256_verify.json
+  sig_v2_invalid_encoding_rejects.json
   evp_verify_bundle_good.json
 )
 
@@ -259,7 +264,9 @@ run_well_known_capabilities_case() {
   echo "$cap" | jq -e '.protocol.versions | index("v1") != null' >/dev/null
   echo "$cap" | jq -e '.evidence.bundle_versions | index("evidence-v1") != null' >/dev/null
   echo "$cap" | jq -e '.signatures.envelopes | index("sig-v1") != null' >/dev/null
+  echo "$cap" | jq -e '.signatures.envelopes | index("sig-v2") != null' >/dev/null
   echo "$cap" | jq -e '.signatures.algorithms | index("ed25519") != null' >/dev/null
+  echo "$cap" | jq -e '.signatures.algorithms | index("es256") != null' >/dev/null
   echo "$cap" | jq -e '.evidence.always_present_artifacts | index("anchors") != null' >/dev/null
   echo "$cap" | jq -e '.evidence.always_present_artifacts | index("webhook_receipts") != null' >/dev/null
 }
@@ -291,7 +298,7 @@ run_agent_id_offline_case() {
   local fixture expected got
   fixture="$ROOT/conformance/cases/agent_id_v1_roundtrip.json"
   expected="$(jq -er '.expected_agent_id' "$fixture")"
-  got="$(go test ./sdk/go/contractlane -count=1 -run TestAgentID_ConformanceVector >/dev/null && echo "$expected")"
+  got="$( (cd "$ROOT/sdk/go/contractlane" && go test ./... -count=1 -run TestAgentID_ConformanceVector >/dev/null) && echo "$expected" )"
   [[ "$got" == "$expected" ]]
 }
 
@@ -326,15 +333,15 @@ run_settlement_proof_make_offline_case() {
 }
 
 run_rules_v1_require_settlement_paid_passes_case() {
-  GOCACHE=/tmp/go-build go test ./sdk/go/contractlane -count=1 -run TestVerifySettlementProofV1_RulesRequireSettlementPaidPasses >/dev/null
+  (cd "$ROOT/sdk/go/contractlane" && GOCACHE=/tmp/go-build go test ./... -count=1 -run TestVerifySettlementProofV1_RulesRequireSettlementPaidPasses) >/dev/null
 }
 
 run_rules_v1_require_settlement_paid_fails_case() {
-  GOCACHE=/tmp/go-build go test ./sdk/go/contractlane -count=1 -run TestVerifySettlementProofV1_RulesRequireSettlementPaidFails >/dev/null
+  (cd "$ROOT/sdk/go/contractlane" && GOCACHE=/tmp/go-build go test ./... -count=1 -run TestVerifySettlementProofV1_RulesRequireSettlementPaidFails) >/dev/null
 }
 
 run_rules_v1_require_amount_match_fails_case() {
-  GOCACHE=/tmp/go-build go test ./sdk/go/contractlane -count=1 -run TestVerifySettlementProofV1_RulesRequireAmountMatchFails >/dev/null
+  (cd "$ROOT/sdk/go/contractlane" && GOCACHE=/tmp/go-build go test ./... -count=1 -run TestVerifySettlementProofV1_RulesRequireAmountMatchFails) >/dev/null
 }
 
 run_settlement_delegation_self_issued_case() {
@@ -346,19 +353,19 @@ run_settlement_delegation_self_issued_case() {
 }
 
 run_settlement_delegation_missing_case() {
-  GOCACHE=/tmp/go-build go test ./sdk/go/contractlane -count=1 -run TestVerifySettlementProofV1_AuthorizationMissingDelegationFails >/dev/null
+  (cd "$ROOT/sdk/go/contractlane" && GOCACHE=/tmp/go-build go test ./... -count=1 -run TestVerifySettlementProofV1_AuthorizationMissingDelegationFails) >/dev/null
 }
 
 run_settlement_delegation_expired_case() {
-  GOCACHE=/tmp/go-build go test ./sdk/go/contractlane -count=1 -run TestVerifySettlementProofV1_AuthorizationExpiredDelegationFails >/dev/null
+  (cd "$ROOT/sdk/go/contractlane" && GOCACHE=/tmp/go-build go test ./... -count=1 -run TestVerifySettlementProofV1_AuthorizationExpiredDelegationFails) >/dev/null
 }
 
 run_settlement_delegation_amount_exceeded_case() {
-  GOCACHE=/tmp/go-build go test ./sdk/go/contractlane -count=1 -run TestVerifySettlementProofV1_AuthorizationAmountExceededFails >/dev/null
+  (cd "$ROOT/sdk/go/contractlane" && GOCACHE=/tmp/go-build go test ./... -count=1 -run TestVerifySettlementProofV1_AuthorizationAmountExceededFails) >/dev/null
 }
 
 run_settlement_delegation_root_trust_case() {
-  GOCACHE=/tmp/go-build go test ./sdk/go/contractlane -count=1 -run TestVerifySettlementProofV1_AuthorizationRootIssuedNeedsTrust >/dev/null
+  (cd "$ROOT/sdk/go/contractlane" && GOCACHE=/tmp/go-build go test ./... -count=1 -run TestVerifySettlementProofV1_AuthorizationRootIssuedNeedsTrust) >/dev/null
 }
 
 ensure_conformance_context() {
@@ -438,6 +445,58 @@ run_sigv1_case() {
   CONFORMANCE_CONTRACT_ID="$contract_id"
   export CONFORMANCE_CONTRACT_ID
   echo "{\"contract_id\":$(json_quote "$contract_id"),\"status\":\"APPROVED\"}"
+}
+
+run_sigv2_case() {
+  local agent_auth human_auth contract_create contract_id route_resp aprq signed_payload envelope decide_req decide_resp decide_status
+
+  agent_auth="Authorization: Bearer $AGENT_TOKEN"
+  human_auth="Authorization: Bearer $HUMAN_TOKEN"
+
+  curl_json POST "$BASE_URL/cel/dev/seed-template" "$(jq -cn --arg principal "$PRINCIPAL_ID" '{principal_id:$principal}')" "$agent_auth" >/dev/null
+
+  contract_create="$(curl_json POST "$BASE_URL/cel/contracts" "$(jq -cn --arg principal "$PRINCIPAL_ID" --arg actor "$AGENT_ACTOR_ID" --arg idem "conf-create-sigv2-$(date +%s)-$RANDOM" '{actor_context:{principal_id:$principal,actor_id:$actor,actor_type:"AGENT",idempotency_key:$idem},template_id:"tpl_nda_us_v1",counterparty:{name:"Conformance Co",email:"counterparty@example.com"},initial_variables:{}}')" "$agent_auth")"
+  contract_id="$(echo "$contract_create" | jq -er '.contract.contract_id')"
+
+  route_resp="$(curl_json POST "$BASE_URL/cel/contracts/$contract_id/approvals:route" "$(jq -cn --arg principal "$PRINCIPAL_ID" --arg actor "$AGENT_ACTOR_ID" '{actor_context:{principal_id:$principal,actor_id:$actor,actor_type:"AGENT"},action:"SEND_FOR_SIGNATURE",required_roles:["LEGAL"]}')" "$agent_auth")"
+  aprq="$(echo "$route_resp" | jq -er '.approval_request.approval_request_id')"
+
+  signed_payload="$(jq -cn --arg cid "$contract_id" --arg aprq "$aprq" --arg nonce "conf-nonce-sigv2-$RANDOM" '{contract_id:$cid,approval_request_id:$aprq,packet_hash:"sha256:dev",diff_hash:"sha256:dev",risk_hash:"sha256:dev",nonce:$nonce}')"
+  envelope="$(go run "$ROOT/conformance/runner/helpers/sigv2/main.go" "$signed_payload")"
+
+  decide_req="$(jq -cn --arg principal "$PRINCIPAL_ID" --arg actor "$HUMAN_ACTOR_ID" --argjson payload "$signed_payload" --argjson env "$envelope" '{actor_context:{principal_id:$principal,actor_id:$actor,actor_type:"HUMAN",idempotency_key:"conf-decide-sigv2-1"},decision:"APPROVE",signed_payload:$payload,signed_payload_hash:$env.payload_hash,signature_envelope:$env}')"
+  decide_resp="$(curl_json POST "$BASE_URL/cel/approvals/$aprq:decide" "$decide_req" "$human_auth")"
+  decide_status="$(echo "$decide_resp" | jq -er '.status')"
+  [[ "$decide_status" == "APPROVED" ]]
+}
+
+run_sigv2_bad_signature_case() {
+  local agent_auth human_auth contract_create contract_id route_resp aprq signed_payload envelope bad_env decide_req tmp status body
+
+  agent_auth="Authorization: Bearer $AGENT_TOKEN"
+  human_auth="Authorization: Bearer $HUMAN_TOKEN"
+
+  curl_json POST "$BASE_URL/cel/dev/seed-template" "$(jq -cn --arg principal "$PRINCIPAL_ID" '{principal_id:$principal}')" "$agent_auth" >/dev/null
+
+  contract_create="$(curl_json POST "$BASE_URL/cel/contracts" "$(jq -cn --arg principal "$PRINCIPAL_ID" --arg actor "$AGENT_ACTOR_ID" --arg idem "conf-create-sigv2-bad-$(date +%s)-$RANDOM" '{actor_context:{principal_id:$principal,actor_id:$actor,actor_type:"AGENT",idempotency_key:$idem},template_id:"tpl_nda_us_v1",counterparty:{name:"Conformance Co",email:"counterparty@example.com"},initial_variables:{}}')" "$agent_auth")"
+  contract_id="$(echo "$contract_create" | jq -er '.contract.contract_id')"
+
+  route_resp="$(curl_json POST "$BASE_URL/cel/contracts/$contract_id/approvals:route" "$(jq -cn --arg principal "$PRINCIPAL_ID" --arg actor "$AGENT_ACTOR_ID" '{actor_context:{principal_id:$principal,actor_id:$actor,actor_type:"AGENT"},action:"SEND_FOR_SIGNATURE",required_roles:["LEGAL"]}')" "$agent_auth")"
+  aprq="$(echo "$route_resp" | jq -er '.approval_request.approval_request_id')"
+
+  signed_payload="$(jq -cn --arg cid "$contract_id" --arg aprq "$aprq" --arg nonce "conf-nonce-sigv2-bad-$RANDOM" '{contract_id:$cid,approval_request_id:$aprq,packet_hash:"sha256:dev",diff_hash:"sha256:dev",risk_hash:"sha256:dev",nonce:$nonce}')"
+  envelope="$(go run "$ROOT/conformance/runner/helpers/sigv2/main.go" "$signed_payload")"
+  bad_env="$(echo "$envelope" | jq '.signature = "not_base64url"')"
+
+  decide_req="$(jq -cn --arg principal "$PRINCIPAL_ID" --arg actor "$HUMAN_ACTOR_ID" --argjson payload "$signed_payload" --argjson env "$bad_env" '{actor_context:{principal_id:$principal,actor_id:$actor,actor_type:"HUMAN",idempotency_key:"conf-decide-sigv2-bad-1"},decision:"APPROVE",signed_payload:$payload,signed_payload_hash:$env.payload_hash,signature_envelope:$env}')"
+
+  tmp="$(mktemp)"
+  status="$(curl -sS -o "$tmp" -w '%{http_code}' -X POST "$BASE_URL/cel/approvals/$aprq:decide" -H 'content-type: application/json' -H "$human_auth" -d "$decide_req")"
+  body="$(cat "$tmp")"
+  rm -f "$tmp"
+
+  [[ "$status" == "403" ]]
+  echo "$body" | jq -e '.error.code=="BAD_SIGNATURE"' >/dev/null
 }
 
 run_evidence_artifact_case() {
@@ -556,6 +615,18 @@ run_delegation_revocation_root_issued_valid_case() {
 
 run_delegation_revocation_signature_invalid_ignored_case() {
   GOCACHE=/tmp/go-build go test ./services/cel/cmd/server -count=1 -run TestEvaluateHostedCommerceAuthorization_RevocationInvalidSignatureIgnored >/dev/null
+}
+
+run_delegation_v1_p256_sign_verify_case() {
+  (cd "$ROOT/sdk/go/contractlane" && GOCACHE=/tmp/go-build go test ./... -count=1 -run TestDelegationV1_SignAndVerifyES256) >/dev/null
+}
+
+run_mixed_signers_ed25519_p256_verify_case() {
+  (cd "$ROOT/sdk/go/contractlane" && GOCACHE=/tmp/go-build go test ./... -count=1 -run TestMixedSignerVerification_Ed25519AndES256) >/dev/null
+}
+
+run_sigv2_invalid_encoding_rejects_case() {
+  GOCACHE=/tmp/go-build go test ./pkg/signature -count=1 -run TestVerifyEnvelopeV2_InvalidEncodingCases >/dev/null
 }
 
 run_evp_case() {
@@ -697,7 +768,7 @@ run_sdk_conformance_suite() {
   PYTHONNOUSERSITE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 CL_CONFORMANCE=1 CL_BASE_URL="$BASE_URL" CL_IAL_BASE_URL="$IAL_BASE_URL" "$PY_SDK_PYTHON" -m pytest "$ROOT/sdk/python/tests" -q -k conformance
 
   cd "$ROOT"
-  CL_CONFORMANCE=1 CL_BASE_URL="$BASE_URL" CL_IAL_BASE_URL="$IAL_BASE_URL" go test ./sdk/go/contractlane -count=1 -run Conformance
+  (cd "$ROOT/sdk/go/contractlane" && CL_CONFORMANCE=1 CL_BASE_URL="$BASE_URL" CL_IAL_BASE_URL="$IAL_BASE_URL" go test ./... -count=1 -run Conformance)
 }
 
 export CL_BASE_URL="$BASE_URL"
@@ -759,6 +830,8 @@ if [[ "$RUN_STATUS" == "PASS" ]]; then
     fi
   fi
 fi
+run_case "sig_v2_approval_happy_path.json" run_sigv2_case || true
+run_case "sig_v2_approval_bad_signature.json" run_sigv2_bad_signature_case || true
 run_case "hosted_commerce_intent_roundtrip.json" run_hosted_commerce_intent_roundtrip_case || true
 run_case "hosted_commerce_accept_roundtrip.json" run_hosted_commerce_accept_roundtrip_case || true
 run_case "hosted_authorization_missing_delegation_intent.json" run_hosted_authorization_missing_delegation_intent_case || true
@@ -775,6 +848,9 @@ run_case "proof_bundle_v1_export_deterministic.json" run_proof_bundle_v1_export_
 run_case "proof_bundle_v1_id_matches.json" run_proof_bundle_v1_id_matches_case || true
 run_case "proof_bundle_v1_offline_verify_ok.json" run_proof_bundle_v1_offline_verify_ok_case || true
 run_case "proof_bundle_v1_tamper_fails.json" run_proof_bundle_v1_tamper_fails_case || true
+run_case "delegation_v1_p256_sign_verify.json" run_delegation_v1_p256_sign_verify_case || true
+run_case "mixed_signers_ed25519_p256_verify.json" run_mixed_signers_ed25519_p256_verify_case || true
+run_case "sig_v2_invalid_encoding_rejects.json" run_sigv2_invalid_encoding_rejects_case || true
 run_case "evp_verify_bundle_good.json" run_evp_case || true
 
 # Remaining five shared conformance cases are validated by SDK conformance suites.

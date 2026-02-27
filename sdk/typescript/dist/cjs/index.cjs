@@ -11,9 +11,12 @@ exports.sha256Hex = sha256Hex;
 exports.hexToBytes = hexToBytes;
 exports.bytesToBase64 = bytesToBase64;
 exports.agentIdFromPublicKey = agentIdFromPublicKey;
+exports.agentIdV2FromP256PublicKey = agentIdV2FromP256PublicKey;
 exports.parseAgentId = parseAgentId;
 exports.isValidAgentId = isValidAgentId;
 exports.parseSigV1 = parseSigV1;
+exports.parseSigV2 = parseSigV2;
+exports.parseSignatureEnvelope = parseSignatureEnvelope;
 exports.normalizeAmountV1 = normalizeAmountV1;
 exports.parseAmountV1 = parseAmountV1;
 exports.parseDelegationV1 = parseDelegationV1;
@@ -23,20 +26,25 @@ exports.newCommerceAcceptV1 = newCommerceAcceptV1;
 exports.newDelegationV1 = newDelegationV1;
 exports.newDelegationRevocationV1 = newDelegationRevocationV1;
 exports.sigV1Sign = sigV1Sign;
+exports.sigV2Sign = sigV2Sign;
 exports.parseProofBundleV1 = parseProofBundleV1;
 exports.computeProofId = computeProofId;
 exports.verifyProofBundleV1 = verifyProofBundleV1;
 exports.hashDelegationV1 = hashDelegationV1;
 exports.signDelegationV1 = signDelegationV1;
+exports.signDelegationV1ES256 = signDelegationV1ES256;
 exports.verifyDelegationV1 = verifyDelegationV1;
 exports.evaluateDelegationConstraints = evaluateDelegationConstraints;
 exports.hashCommerceIntentV1 = hashCommerceIntentV1;
 exports.signCommerceIntentV1 = signCommerceIntentV1;
+exports.signCommerceIntentV1ES256 = signCommerceIntentV1ES256;
 exports.verifyCommerceIntentV1 = verifyCommerceIntentV1;
 exports.hashCommerceAcceptV1 = hashCommerceAcceptV1;
 exports.signCommerceAcceptV1 = signCommerceAcceptV1;
+exports.signCommerceAcceptV1ES256 = signCommerceAcceptV1ES256;
 exports.verifyCommerceAcceptV1 = verifyCommerceAcceptV1;
 exports.buildSignatureEnvelopeV1 = buildSignatureEnvelopeV1;
+exports.buildSignatureEnvelopeV2 = buildSignatureEnvelopeV2;
 const crypto_1 = require("crypto");
 const tweetnacl_1 = __importDefault(require("tweetnacl"));
 exports.API_VERSION = 'v1';
@@ -219,11 +227,70 @@ class ContractLaneClient {
             raw,
         };
     }
+    async createTemplate(input, opts) {
+        return this.request('POST', '/cel/admin/templates', input, this.idempotencyHeaders(opts?.idempotencyKey), true);
+    }
+    async updateTemplate(templateId, input, opts) {
+        return this.request('PUT', `/cel/admin/templates/${encodeURIComponent(templateId)}`, input, this.idempotencyHeaders(opts?.idempotencyKey), true);
+    }
+    async publishTemplate(templateId, opts) {
+        return this.request('POST', `/cel/admin/templates/${encodeURIComponent(templateId)}:publish`, {}, this.idempotencyHeaders(opts?.idempotencyKey), true);
+    }
+    async archiveTemplate(templateId, opts) {
+        return this.request('POST', `/cel/admin/templates/${encodeURIComponent(templateId)}:archive`, {}, this.idempotencyHeaders(opts?.idempotencyKey), true);
+    }
+    async cloneTemplate(templateId, input, opts) {
+        return this.request('POST', `/cel/admin/templates/${encodeURIComponent(templateId)}:clone`, input, this.idempotencyHeaders(opts?.idempotencyKey), true);
+    }
+    async getTemplateAdmin(templateId) {
+        return this.request('GET', `/cel/admin/templates/${encodeURIComponent(templateId)}`, undefined, undefined, true);
+    }
+    async listTemplatesAdmin(filters) {
+        const q = new URLSearchParams();
+        if (filters?.status)
+            q.set('status', filters.status);
+        if (filters?.visibility)
+            q.set('visibility', filters.visibility);
+        if (filters?.owner_principal_id)
+            q.set('owner_principal_id', filters.owner_principal_id);
+        if (filters?.contract_type)
+            q.set('contract_type', filters.contract_type);
+        if (filters?.jurisdiction)
+            q.set('jurisdiction', filters.jurisdiction);
+        const suffix = q.toString() ? `?${q.toString()}` : '';
+        return this.request('GET', `/cel/admin/templates${suffix}`, undefined, undefined, true);
+    }
+    async listTemplateShares(templateId) {
+        const raw = await this.request('GET', `/cel/admin/templates/${encodeURIComponent(templateId)}/shares`, undefined, undefined, true);
+        return {
+            request_id: raw.request_id,
+            admin: raw.admin,
+            template_id: raw.template_id,
+            visibility: raw.visibility,
+            shares: raw.shares,
+            raw,
+        };
+    }
+    async addTemplateShare(templateId, principalId, opts) {
+        return this.request('POST', `/cel/admin/templates/${encodeURIComponent(templateId)}/shares`, { principal_id: principalId }, this.idempotencyHeaders(opts?.idempotencyKey), true);
+    }
+    async removeTemplateShare(templateId, principalId, opts) {
+        return this.request('DELETE', `/cel/admin/templates/${encodeURIComponent(templateId)}/shares/${encodeURIComponent(principalId)}`, undefined, this.idempotencyHeaders(opts?.idempotencyKey), true);
+    }
     setSigningKeyEd25519(secretKey, keyId) {
         if (!secretKey || secretKey.length !== 64) {
             throw new Error('ed25519 secretKey must be 64 bytes (tweetnacl format)');
         }
-        this.signingKey = secretKey;
+        this.signingKeyEd25519 = secretKey;
+        this.signingKeyES256 = undefined;
+        this.keyId = keyId;
+    }
+    setSigningKeyES256(privateKey, keyId) {
+        if (!privateKey) {
+            throw new Error('es256 private key is required');
+        }
+        this.signingKeyES256 = privateKey;
+        this.signingKeyEd25519 = undefined;
         this.keyId = keyId;
     }
     setSigningContext(context) {
@@ -266,6 +333,33 @@ class ContractLaneClient {
             throw new IncompatibleNodeError(missing);
         }
     }
+    async requireProtocolV2ES256() {
+        const caps = await this.fetchCapabilities();
+        const missing = [];
+        const protocolName = caps.protocol?.name;
+        const protocolVersions = caps.protocol?.versions ?? [];
+        const evidenceBundleVersions = caps.evidence?.bundle_versions ?? [];
+        const evidenceAlwaysPresent = caps.evidence?.always_present_artifacts ?? [];
+        const signatureEnvelopes = caps.signatures?.envelopes ?? [];
+        const signatureAlgorithms = caps.signatures?.algorithms ?? [];
+        if (protocolName !== 'contractlane')
+            missing.push('protocol.name:contractlane');
+        if (!protocolVersions.includes('v1'))
+            missing.push('protocol.versions:v1');
+        if (!evidenceBundleVersions.includes('evidence-v1'))
+            missing.push('evidence.bundle_versions:evidence-v1');
+        if (!signatureEnvelopes.includes('sig-v2'))
+            missing.push('signatures.envelopes:sig-v2');
+        if (!signatureAlgorithms.includes('es256'))
+            missing.push('signatures.algorithms:es256');
+        if (!evidenceAlwaysPresent.includes('anchors'))
+            missing.push('evidence.always_present_artifacts:anchors');
+        if (!evidenceAlwaysPresent.includes('webhook_receipts'))
+            missing.push('evidence.always_present_artifacts:webhook_receipts');
+        if (missing.length > 0) {
+            throw new IncompatibleNodeError(missing);
+        }
+    }
     async approvalDecide(approvalRequestId, input) {
         const body = {
             actor_context: input.actor_context,
@@ -275,13 +369,21 @@ class ContractLaneClient {
         if (input.signed_payload_hash) {
             body.signed_payload_hash = input.signed_payload_hash;
         }
-        if (this.signingKey && !input.signature_envelope) {
+        if (!input.signature_envelope && this.signingKeyEd25519) {
             if (!this.disableCapabilityCheck) {
                 await this.requireProtocolV1();
             }
-            const env = buildSignatureEnvelopeV1(body.signed_payload, this.signingKey, new Date(), this.signingContext, this.keyId);
+            const env = buildSignatureEnvelopeV1(body.signed_payload, this.signingKeyEd25519, new Date(), this.signingContext, this.keyId);
             body.signature_envelope = env;
-            body.signed_payload_hash = canonicalSha256Hex(body.signed_payload);
+            body.signed_payload_hash = env.payload_hash;
+        }
+        else if (!input.signature_envelope && this.signingKeyES256) {
+            if (!this.disableCapabilityCheck) {
+                await this.requireProtocolV2ES256();
+            }
+            const env = buildSignatureEnvelopeV2(body.signed_payload, this.signingKeyES256, new Date(), this.signingContext, this.keyId);
+            body.signature_envelope = env;
+            body.signed_payload_hash = env.payload_hash;
         }
         else if (input.signature_envelope) {
             body.signature_envelope = input.signature_envelope;
@@ -359,6 +461,11 @@ class ContractLaneClient {
             details: inner.details,
         });
     }
+    idempotencyHeaders(idempotencyKey) {
+        if (!idempotencyKey || !idempotencyKey.trim())
+            return undefined;
+        return { 'Idempotency-Key': idempotencyKey.trim() };
+    }
 }
 exports.ContractLaneClient = ContractLaneClient;
 function stableStringify(obj) {
@@ -393,21 +500,21 @@ function bytesToBase64(bytes) {
 function bytesToBase64URLNoPadding(bytes) {
     return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
-function base64URLNoPaddingToBytes(input) {
+function base64URLNoPaddingToBytes(input, field) {
     if (input.length === 0) {
-        throw new Error('missing public key');
+        throw new Error(`missing ${field}`);
     }
     if (input.includes('=')) {
         throw new Error('invalid base64url padding');
     }
     if (!/^[A-Za-z0-9_-]+$/.test(input)) {
-        throw new Error('invalid base64url public key');
+        throw new Error(`invalid base64url ${field}`);
     }
     const padLen = (4 - (input.length % 4)) % 4;
     const padded = input.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat(padLen);
     const decoded = Buffer.from(padded, 'base64');
     if (bytesToBase64URLNoPadding(decoded).replace(/=+$/g, '') !== input) {
-        throw new Error('invalid base64url public key');
+        throw new Error(`invalid base64url ${field}`);
     }
     return Uint8Array.from(decoded);
 }
@@ -417,22 +524,43 @@ function agentIdFromPublicKey(pub) {
     }
     return `agent:pk:ed25519:${bytesToBase64URLNoPadding(pub)}`;
 }
+function agentIdV2FromP256PublicKey(pub) {
+    if (!pub || pub.length !== 65 || pub[0] !== 0x04) {
+        throw new Error('p256 public key must be SEC1 uncompressed 65 bytes');
+    }
+    p256PublicKeyFromSec1Uncompressed(pub);
+    return `agent:v2:pk:p256:${bytesToBase64URLNoPadding(pub)}`;
+}
 function parseAgentId(id) {
     const parts = id.split(':');
-    if (parts.length !== 4) {
-        throw new Error('invalid agent id format');
+    if (parts.length === 4) {
+        if (parts[0] !== 'agent' || parts[1] !== 'pk') {
+            throw new Error('invalid agent id prefix');
+        }
+        if (parts[2] !== 'ed25519') {
+            throw new Error('unsupported algorithm');
+        }
+        const decoded = base64URLNoPaddingToBytes(parts[3], 'public key');
+        if (decoded.length !== 32) {
+            throw new Error('invalid ed25519 public key length');
+        }
+        return { algo: 'ed25519', publicKey: decoded };
     }
-    if (parts[0] !== 'agent' || parts[1] !== 'pk') {
-        throw new Error('invalid agent id prefix');
+    if (parts.length === 5) {
+        if (parts[0] !== 'agent' || parts[1] !== 'v2' || parts[2] !== 'pk') {
+            throw new Error('invalid agent id prefix');
+        }
+        if (parts[3] !== 'p256') {
+            throw new Error('unsupported algorithm');
+        }
+        const decoded = base64URLNoPaddingToBytes(parts[4], 'public key');
+        if (decoded.length !== 65 || decoded[0] !== 0x04) {
+            throw new Error('invalid p256 public key encoding');
+        }
+        p256PublicKeyFromSec1Uncompressed(decoded);
+        return { algo: 'p256', publicKey: decoded };
     }
-    if (parts[2] !== 'ed25519') {
-        throw new Error('unsupported algorithm');
-    }
-    const decoded = base64URLNoPaddingToBytes(parts[3]);
-    if (decoded.length !== 32) {
-        throw new Error('invalid ed25519 public key length');
-    }
-    return { algo: 'ed25519', publicKey: decoded };
+    throw new Error('invalid agent id format');
 }
 function isValidAgentId(id) {
     try {
@@ -456,7 +584,7 @@ function validateBase64URLNoPadding(v, field) {
     if (!v || v.includes('=') || !/^[A-Za-z0-9_-]+$/.test(v)) {
         throw new Error(`${field} must be base64url without padding`);
     }
-    base64URLNoPaddingToBytes(v);
+    base64URLNoPaddingToBytes(v, field);
 }
 function normalizeCommerceIntentV1(intent) {
     if (intent.version !== 'commerce-intent-v1')
@@ -603,6 +731,38 @@ function parseSigV1(sig, expectedContext) {
         throw new Error('invalid signature encoding');
     return sig;
 }
+function parseSigV2(sig, expectedContext) {
+    const allowed = new Set(['version', 'algorithm', 'public_key', 'signature', 'payload_hash', 'issued_at', 'context', 'key_id']);
+    for (const k of Object.keys(sig))
+        if (!allowed.has(k))
+            throw new Error(`unknown signature key: ${k}`);
+    if (sig.version !== 'sig-v2')
+        throw new Error('signature_envelope version must be sig-v2');
+    if (sig.algorithm !== 'es256')
+        throw new Error('signature_envelope algorithm must be es256');
+    if (!/^[0-9a-f]{64}$/.test(sig.payload_hash))
+        throw new Error('payload_hash must be lowercase hex sha256');
+    parseRFC3339UTC(sig.issued_at, 'issued_at');
+    if (expectedContext && sig.context && sig.context !== expectedContext)
+        throw new Error('signature context mismatch');
+    const pub = base64URLNoPaddingToBytes(sig.public_key, 'signature public key');
+    if (pub.length !== 65 || pub[0] !== 0x04)
+        throw new Error('invalid signature public_key encoding');
+    p256PublicKeyFromSec1Uncompressed(pub);
+    const rawSig = base64URLNoPaddingToBytes(sig.signature, 'signature');
+    if (rawSig.length !== 64)
+        throw new Error('invalid signature encoding');
+    return sig;
+}
+function parseSignatureEnvelope(sig, expectedContext) {
+    if (!sig || typeof sig !== 'object')
+        throw new Error('signature_envelope must be object');
+    if (sig.version === 'sig-v1')
+        return parseSigV1(sig, expectedContext);
+    if (sig.version === 'sig-v2')
+        return parseSigV2(sig, expectedContext);
+    throw new Error('signature_envelope version must be sig-v1 or sig-v2');
+}
 function normalizeAmountV1(currency, minorUnits) {
     if (!Number.isInteger(minorUnits) || minorUnits < 0)
         throw new Error('minor units must be non-negative integer');
@@ -694,6 +854,29 @@ function sigV1Sign(context, payloadHash, secretKey, issuedAt, keyId) {
         ...(keyId ? { key_id: keyId } : {}),
     };
 }
+function sigV2Sign(context, payloadHash, privateKey, issuedAt, keyId) {
+    if (!/^[0-9a-f]{64}$/.test(payloadHash))
+        throw new Error('payload_hash must be lowercase hex sha256');
+    if (!privateKey)
+        throw new Error('es256 private key is required');
+    const keyObj = privateKey instanceof crypto_1.KeyObject ? privateKey : (0, crypto_1.createPrivateKey)(privateKey);
+    const msg = Buffer.from(payloadHash, 'hex');
+    const sigRaw = (0, crypto_1.sign)(null, msg, { key: keyObj, dsaEncoding: 'ieee-p1363' });
+    if (sigRaw.length !== 64)
+        throw new Error('invalid es256 signature length');
+    const pubDer = (0, crypto_1.createPublicKey)(keyObj).export({ type: 'spki', format: 'der' });
+    const sec1 = spkiP256ToSec1Uncompressed(pubDer);
+    return {
+        version: 'sig-v2',
+        algorithm: 'es256',
+        public_key: bytesToBase64URLNoPadding(sec1),
+        signature: bytesToBase64URLNoPadding(sigRaw),
+        payload_hash: payloadHash,
+        issued_at: issuedAt.toISOString(),
+        context,
+        ...(keyId ? { key_id: keyId } : {}),
+    };
+}
 function parseProofBundleV1(proof) {
     if (!proof || typeof proof !== 'object')
         throw new Error('proof bundle must be object');
@@ -774,25 +957,17 @@ function signDelegationV1(payload, secretKey, issuedAt) {
     const normalized = normalizeDelegationV1(payload);
     return buildSignatureEnvelopeV1(normalized, secretKey, issuedAt, 'delegation');
 }
+function signDelegationV1ES256(payload, privateKey, issuedAt) {
+    const normalized = normalizeDelegationV1(payload);
+    return buildSignatureEnvelopeV2(normalized, privateKey, issuedAt, 'delegation');
+}
 function verifyDelegationV1(payload, sig) {
     const normalized = normalizeDelegationV1(payload);
-    if (sig.version !== 'sig-v1')
-        throw new Error('signature_envelope version must be sig-v1');
-    if (sig.algorithm !== 'ed25519')
-        throw new Error('signature_envelope algorithm must be ed25519');
-    if (sig.context && sig.context !== 'delegation')
-        throw new Error('signature context mismatch');
-    parseRFC3339UTC(sig.issued_at, 'issued_at');
     const expected = hashDelegationV1(normalized);
+    verifySignatureEnvelope(normalized, sig, 'delegation');
     if (sig.payload_hash !== expected)
         throw new Error('payload hash mismatch');
-    const pub = Buffer.from(sig.public_key, 'base64');
-    const signature = Buffer.from(sig.signature, 'base64');
-    if (pub.length !== 32 || signature.length !== 64)
-        throw new Error('invalid signature encoding');
-    if (!tweetnacl_1.default.sign.detached.verify(hexToBytes(expected), signature, pub))
-        throw new Error('invalid signature');
-    if (agentIdFromPublicKey(pub) !== normalized.issuer_agent)
+    if (agentIdFromSignatureEnvelope(sig) !== normalized.issuer_agent)
         throw new Error('signature public key does not match issuer_agent');
 }
 function evaluateDelegationConstraints(constraints, evalCtx) {
@@ -831,25 +1006,16 @@ function signCommerceIntentV1(intent, secretKey, issuedAt) {
     const normalized = normalizeCommerceIntentV1(intent);
     return buildSignatureEnvelopeV1(normalized, secretKey, issuedAt, 'commerce-intent');
 }
+function signCommerceIntentV1ES256(intent, privateKey, issuedAt) {
+    const normalized = normalizeCommerceIntentV1(intent);
+    return buildSignatureEnvelopeV2(normalized, privateKey, issuedAt, 'commerce-intent');
+}
 function verifyCommerceIntentV1(intent, sig) {
     const normalized = normalizeCommerceIntentV1(intent);
-    if (sig.version !== 'sig-v1')
-        throw new Error('signature_envelope version must be sig-v1');
-    if (sig.algorithm !== 'ed25519')
-        throw new Error('signature_envelope algorithm must be ed25519');
-    if (sig.context && sig.context !== 'commerce-intent')
-        throw new Error('signature context mismatch');
-    parseRFC3339UTC(sig.issued_at, 'issued_at');
     const expectedHash = hashCommerceIntentV1(normalized);
     if (sig.payload_hash !== expectedHash)
         throw new Error('payload hash mismatch');
-    const pub = Buffer.from(sig.public_key, 'base64');
-    const signature = Buffer.from(sig.signature, 'base64');
-    if (pub.length !== 32 || signature.length !== 64)
-        throw new Error('invalid signature encoding');
-    const ok = tweetnacl_1.default.sign.detached.verify(hexToBytes(expectedHash), signature, pub);
-    if (!ok)
-        throw new Error('invalid signature');
+    verifySignatureEnvelope(normalized, sig, 'commerce-intent');
 }
 function hashCommerceAcceptV1(acc) {
     const normalized = normalizeCommerceAcceptV1(acc);
@@ -859,25 +1025,16 @@ function signCommerceAcceptV1(acc, secretKey, issuedAt) {
     const normalized = normalizeCommerceAcceptV1(acc);
     return buildSignatureEnvelopeV1(normalized, secretKey, issuedAt, 'commerce-accept');
 }
+function signCommerceAcceptV1ES256(acc, privateKey, issuedAt) {
+    const normalized = normalizeCommerceAcceptV1(acc);
+    return buildSignatureEnvelopeV2(normalized, privateKey, issuedAt, 'commerce-accept');
+}
 function verifyCommerceAcceptV1(acc, sig) {
     const normalized = normalizeCommerceAcceptV1(acc);
-    if (sig.version !== 'sig-v1')
-        throw new Error('signature_envelope version must be sig-v1');
-    if (sig.algorithm !== 'ed25519')
-        throw new Error('signature_envelope algorithm must be ed25519');
-    if (sig.context && sig.context !== 'commerce-accept')
-        throw new Error('signature context mismatch');
-    parseRFC3339UTC(sig.issued_at, 'issued_at');
     const expectedHash = hashCommerceAcceptV1(normalized);
     if (sig.payload_hash !== expectedHash)
         throw new Error('payload hash mismatch');
-    const pub = Buffer.from(sig.public_key, 'base64');
-    const signature = Buffer.from(sig.signature, 'base64');
-    if (pub.length !== 32 || signature.length !== 64)
-        throw new Error('invalid signature encoding');
-    const ok = tweetnacl_1.default.sign.detached.verify(hexToBytes(expectedHash), signature, pub);
-    if (!ok)
-        throw new Error('invalid signature');
+    verifySignatureEnvelope(normalized, sig, 'commerce-accept');
 }
 function buildSignatureEnvelopeV1(payload, secretKey, issuedAt, context = 'contract-action', keyId) {
     if (!secretKey || secretKey.length !== 64) {
@@ -897,4 +1054,69 @@ function buildSignatureEnvelopeV1(payload, secretKey, issuedAt, context = 'contr
         context,
         ...(keyId ? { key_id: keyId } : {}),
     };
+}
+function buildSignatureEnvelopeV2(payload, privateKey, issuedAt, context = 'contract-action', keyId) {
+    const payloadHash = canonicalSha256Hex(payload);
+    return sigV2Sign(context, payloadHash, privateKey, issuedAt, keyId);
+}
+function spkiP256ToSec1Uncompressed(spkiDer) {
+    // Minimal SPKI parser for EC P-256 keys produced by Node crypto.
+    const p256SpkiPrefix = Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex');
+    if (spkiDer.length === p256SpkiPrefix.length + 65 && spkiDer.subarray(0, p256SpkiPrefix.length).equals(p256SpkiPrefix)) {
+        const pub = spkiDer.subarray(p256SpkiPrefix.length);
+        if (pub.length === 65 && pub[0] === 0x04)
+            return Uint8Array.from(pub);
+    }
+    throw new Error('invalid es256 public key encoding');
+}
+function p256PublicKeyFromSec1Uncompressed(sec1Pub) {
+    if (sec1Pub.length !== 65 || sec1Pub[0] !== 0x04)
+        throw new Error('invalid signature public_key encoding');
+    const p256SpkiPrefix = Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex');
+    const der = Buffer.concat([p256SpkiPrefix, Buffer.from(sec1Pub)]);
+    return (0, crypto_1.createPublicKey)({ key: der, format: 'der', type: 'spki' });
+}
+function parseES256SignatureCompat(sig) {
+    try {
+        const raw = Buffer.from(base64URLNoPaddingToBytes(sig, 'signature'));
+        if (raw.length === 64)
+            return { raw64: raw };
+        throw new Error('invalid signature');
+    }
+    catch {
+        // Compatibility path: accept DER in standard base64 from API boundary.
+        const der = Buffer.from(sig, 'base64');
+        if (!der.length)
+            throw new Error('invalid signature encoding');
+        return { der };
+    }
+}
+function verifySignatureEnvelope(payload, sig, expectedContext) {
+    const parsed = parseSignatureEnvelope(sig, expectedContext);
+    const expectedHash = canonicalSha256Hex(payload);
+    if (parsed.payload_hash !== expectedHash)
+        throw new Error('payload hash mismatch');
+    const msg = Buffer.from(expectedHash, 'hex');
+    if (parsed.version === 'sig-v1') {
+        const pub = Buffer.from(parsed.public_key, 'base64');
+        const signature = Buffer.from(parsed.signature, 'base64');
+        if (!tweetnacl_1.default.sign.detached.verify(msg, signature, pub))
+            throw new Error('invalid signature');
+        return;
+    }
+    const pub = p256PublicKeyFromSec1Uncompressed(base64URLNoPaddingToBytes(parsed.public_key, 'signature public key'));
+    const sigCompat = parseES256SignatureCompat(parsed.signature);
+    if (sigCompat.raw64) {
+        if (!(0, crypto_1.verify)(null, msg, { key: pub, dsaEncoding: 'ieee-p1363' }, sigCompat.raw64))
+            throw new Error('invalid signature');
+        return;
+    }
+    if (!sigCompat.der || !(0, crypto_1.verify)(null, msg, pub, sigCompat.der))
+        throw new Error('invalid signature');
+}
+function agentIdFromSignatureEnvelope(sig) {
+    if (sig.algorithm === 'ed25519') {
+        return agentIdFromPublicKey(Buffer.from(sig.public_key, 'base64'));
+    }
+    return agentIdV2FromP256PublicKey(base64URLNoPaddingToBytes(sig.public_key, 'signature public key'));
 }

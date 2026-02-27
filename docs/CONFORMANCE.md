@@ -17,7 +17,9 @@ BASE_URL=http://localhost:8082 ./conformance/runner/run_local_conformance.sh
   - `protocol.versions` contains `"v1"`
   - `evidence.bundle_versions` contains `"evidence-v1"`
   - `signatures.envelopes` contains `"sig-v1"`
+  - `signatures.envelopes` contains `"sig-v2"`
   - `signatures.algorithms` contains `"ed25519"`
+  - `signatures.algorithms` contains `"es256"`
 
 ## Summary Output
 

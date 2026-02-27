@@ -2,6 +2,8 @@ package contractlane
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -397,6 +399,11 @@ func TestConformanceCasesExist(t *testing.T) {
 		"conformance/cases/error_model_401.json",
 		"conformance/cases/retry_429_then_success.json",
 		"conformance/cases/sig_v1_approval_happy_path.json",
+		"conformance/cases/sig_v2_approval_happy_path.json",
+		"conformance/cases/sig_v2_approval_bad_signature.json",
+		"conformance/cases/delegation_v1_p256_sign_verify.json",
+		"conformance/cases/mixed_signers_ed25519_p256_verify.json",
+		"conformance/cases/sig_v2_invalid_encoding_rejects.json",
 		"conformance/cases/evidence_contains_anchors_and_receipts.json",
 		"conformance/cases/evp_verify_bundle_good.json",
 		"conformance/cases/agent_id_v1_roundtrip.json",
@@ -502,6 +509,61 @@ func TestApprovalDecide_UsesSigV1ByDefaultWithEd25519Key(t *testing.T) {
 	}
 }
 
+func TestApprovalDecide_UsesSigV2ByDefaultWithES256Key(t *testing.T) {
+	var gotBody map[string]any
+	var capabilityHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/cel/.well-known/contractlane":
+			capabilityHits++
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"protocol":{"name":"contractlane","versions":["v1"]},
+				"evidence":{"bundle_versions":["evidence-v1"],"always_present_artifacts":["anchors","webhook_receipts"]},
+				"signatures":{"envelopes":["sig-v1","sig-v2"],"algorithms":["ed25519","es256"]}
+			}`))
+		case strings.HasPrefix(r.URL.Path, "/cel/approvals/") && strings.HasSuffix(r.URL.Path, ":decide"):
+			defer r.Body.Close()
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			w.Header().Set("content-type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"approval_request_id": "aprq_1", "status": "APPROVED"})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	c := NewClient(srv.URL, PrincipalAuth{Token: "tok"}, WithSigningKeyES256(priv), WithKeyID("kid_2"), WithContext("contract-action"))
+	c.now = func() time.Time { return time.Date(2026, 2, 18, 12, 0, 0, 0, time.UTC) }
+
+	_, err = c.ApprovalDecide(context.Background(), "aprq_1", ApprovalDecideOptions{
+		ActorContext: ActorContext{PrincipalID: "prn_1", ActorID: "act_1", ActorType: "HUMAN"},
+		Decision:     "APPROVE",
+		SignedPayload: map[string]any{
+			"contract_id":         "ctr_1",
+			"approval_request_id": "aprq_1",
+			"nonce":               "n1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApprovalDecide: %v", err)
+	}
+	env, _ := gotBody["signature_envelope"].(map[string]any)
+	if env == nil {
+		t.Fatalf("expected signature_envelope in request body")
+	}
+	if env["version"] != "sig-v2" || env["algorithm"] != "es256" {
+		t.Fatalf("unexpected v2 envelope: %+v", env)
+	}
+	if capabilityHits != 1 {
+		t.Fatalf("expected one capability probe before sig-v2 approval, got %d", capabilityHits)
+	}
+}
+
 func TestApprovalDecide_LegacyFallbackWithoutSigningKey(t *testing.T) {
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -552,6 +614,27 @@ func TestRequireProtocolV1_PassesForCompatibleNode(t *testing.T) {
 	c := NewClient(srv.URL, nil)
 	if err := c.RequireProtocolV1(context.Background()); err != nil {
 		t.Fatalf("RequireProtocolV1 unexpected error: %v", err)
+	}
+}
+
+func TestRequireProtocolV2ES256_PassesForCompatibleNode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/cel/.well-known/contractlane" {
+			w.WriteHeader(404)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"protocol":{"name":"contractlane","versions":["v1"]},
+			"evidence":{"bundle_versions":["evidence-v1"],"always_present_artifacts":["anchors","webhook_receipts"]},
+			"signatures":{"envelopes":["sig-v1","sig-v2"],"algorithms":["ed25519","es256"]}
+		}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, nil)
+	if err := c.RequireProtocolV2ES256(context.Background()); err != nil {
+		t.Fatalf("RequireProtocolV2ES256 unexpected error: %v", err)
 	}
 }
 

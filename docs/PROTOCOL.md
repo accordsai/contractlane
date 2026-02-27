@@ -15,6 +15,11 @@ Protocol v1.0.0 includes:
 - `rules-v1`
 - `proof-bundle-v1`
 
+Additive post-freeze surfaces implemented without changing v1 semantics:
+
+- `sig-v2` (ES256 / P-256)
+- `agent-id-v2` (P-256 identity encoding)
+
 ## Identifier Matrix (Authoritative)
 
 These values are intentionally not all identical and must be treated as separate surfaces:

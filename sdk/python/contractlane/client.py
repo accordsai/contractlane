@@ -17,7 +17,24 @@ import httpx
 from nacl.signing import SigningKey
 from nacl.signing import VerifyKey
 
+try:
+    from cryptography.exceptions import InvalidSignature as CryptoInvalidSignature
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, encode_dss_signature, Prehashed
+
+    _CRYPTO_BACKEND_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency path
+    CryptoInvalidSignature = Exception
+    hashes = serialization = ec = decode_dss_signature = encode_dss_signature = Prehashed = None
+    _CRYPTO_BACKEND_AVAILABLE = False
+
 APIVersion = "v1"
+
+
+def _require_crypto_backend() -> None:
+    if not _CRYPTO_BACKEND_AVAILABLE:
+        raise ValueError("es256 support requires the 'cryptography' package")
 
 
 @dataclass
@@ -97,6 +114,7 @@ class ContractLaneClient:
         self.disable_capability_check = disable_capability_check
         self.http = httpx.Client(timeout=self.timeout_seconds)
         self._signing_seed_ed25519: Optional[bytes] = None
+        self._signing_key_es256: Optional[Any] = None
         self._signing_key_id: Optional[str] = None
         self._signing_context: str = "contract-action"
         self._capabilities_cache: Optional[Dict[str, Any]] = None
@@ -146,6 +164,38 @@ class ContractLaneClient:
         if not isinstance(evidence_always_present, list) or "webhook_receipts" not in evidence_always_present:
             missing.append("evidence.always_present_artifacts contains webhook_receipts")
 
+        if missing:
+            raise IncompatibleNodeError(missing)
+
+    def require_protocol_v2_es256(self) -> None:
+        caps = self.fetch_capabilities()
+        missing: List[str] = []
+
+        protocol = caps.get("protocol") if isinstance(caps, dict) else {}
+        evidence = caps.get("evidence") if isinstance(caps, dict) else {}
+        signatures = caps.get("signatures") if isinstance(caps, dict) else {}
+
+        protocol_name = protocol.get("name") if isinstance(protocol, dict) else None
+        protocol_versions = protocol.get("versions") if isinstance(protocol, dict) else []
+        evidence_bundle_versions = evidence.get("bundle_versions") if isinstance(evidence, dict) else []
+        evidence_always_present = evidence.get("always_present_artifacts") if isinstance(evidence, dict) else []
+        signatures_envelopes = signatures.get("envelopes") if isinstance(signatures, dict) else []
+        signatures_algorithms = signatures.get("algorithms") if isinstance(signatures, dict) else []
+
+        if protocol_name != "contractlane":
+            missing.append("protocol.name=contractlane")
+        if not isinstance(protocol_versions, list) or "v1" not in protocol_versions:
+            missing.append("protocol.versions contains v1")
+        if not isinstance(evidence_bundle_versions, list) or "evidence-v1" not in evidence_bundle_versions:
+            missing.append("evidence.bundle_versions contains evidence-v1")
+        if not isinstance(signatures_envelopes, list) or "sig-v2" not in signatures_envelopes:
+            missing.append("signatures.envelopes contains sig-v2")
+        if not isinstance(signatures_algorithms, list) or "es256" not in signatures_algorithms:
+            missing.append("signatures.algorithms contains es256")
+        if not isinstance(evidence_always_present, list) or "anchors" not in evidence_always_present:
+            missing.append("evidence.always_present_artifacts contains anchors")
+        if not isinstance(evidence_always_present, list) or "webhook_receipts" not in evidence_always_present:
+            missing.append("evidence.always_present_artifacts contains webhook_receipts")
         if missing:
             raise IncompatibleNodeError(missing)
 
@@ -383,7 +433,19 @@ class ContractLaneClient:
         if not isinstance(seed32, (bytes, bytearray)) or len(seed32) != 32:
             raise ValueError("ed25519 signing key seed must be 32 bytes")
         self._signing_seed_ed25519 = bytes(seed32)
+        self._signing_key_es256 = None
         self._signing_key_id = key_id
+
+    def set_signing_key_es256(self, private_key: Any, key_id: Optional[str] = None) -> None:
+        self._signing_key_es256 = _load_es256_private_key(private_key)
+        self._signing_seed_ed25519 = None
+        self._signing_key_id = key_id
+
+    def setSigningKeyEd25519(self, seed32: bytes, key_id: Optional[str] = None) -> None:
+        self.set_signing_key_ed25519(seed32, key_id=key_id)
+
+    def setSigningKeyES256(self, private_key: Any, key_id: Optional[str] = None) -> None:
+        self.set_signing_key_es256(private_key, key_id=key_id)
 
     def set_signing_context(self, context: str) -> None:
         self._signing_context = context
@@ -412,6 +474,17 @@ class ContractLaneClient:
             signature_envelope = build_signature_envelope_v1(
                 payload=signed_payload,
                 signing_key=self._signing_seed_ed25519,
+                issued_at=datetime.now(timezone.utc),
+                context=self._signing_context or "contract-action",
+                key_id=self._signing_key_id,
+            )
+            body["signed_payload_hash"] = _canonical_sha256_hex(signed_payload)
+        elif signature_envelope is None and self._signing_key_es256 is not None:
+            if not self.disable_capability_check:
+                self.require_protocol_v2_es256()
+            signature_envelope = build_signature_envelope_v2(
+                payload=signed_payload,
+                signing_key=self._signing_key_es256,
                 issued_at=datetime.now(timezone.utc),
                 context=self._signing_context or "contract-action",
                 key_id=self._signing_key_id,
@@ -555,6 +628,36 @@ def build_signature_envelope_v1(
     return env
 
 
+def _load_es256_private_key(signing_key: Any) -> ec.EllipticCurvePrivateKey:
+    _require_crypto_backend()
+    if isinstance(signing_key, ec.EllipticCurvePrivateKey):
+        if not isinstance(signing_key.curve, ec.SECP256R1):
+            raise ValueError("es256 private key must be P-256")
+        return signing_key
+    if isinstance(signing_key, str):
+        signing_key = signing_key.encode("utf-8")
+    if isinstance(signing_key, (bytes, bytearray)):
+        try:
+            key = serialization.load_pem_private_key(bytes(signing_key), password=None)
+        except Exception:
+            key = serialization.load_der_private_key(bytes(signing_key), password=None)
+        if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
+            raise ValueError("es256 private key must be P-256")
+        return key
+    raise ValueError("es256 private key is required")
+
+
+def build_signature_envelope_v2(
+    payload: Dict[str, Any],
+    signing_key: Any,
+    issued_at: datetime,
+    context: str = "contract-action",
+    key_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload_hash = _canonical_sha256_hex(payload)
+    return sig_v2_sign(context=context, payload_hash=payload_hash, signing_key=signing_key, issued_at=_format_issued_at_utc(issued_at), key_id=key_id)
+
+
 def agent_id_from_public_key(pub: bytes) -> str:
     if not isinstance(pub, (bytes, bytearray)) or len(pub) != 32:
         raise ValueError("ed25519 public key must be 32 bytes")
@@ -562,29 +665,44 @@ def agent_id_from_public_key(pub: bytes) -> str:
     return "agent:pk:ed25519:" + b64
 
 
+def agent_id_v2_from_p256_public_key(pub: bytes) -> str:
+    _require_crypto_backend()
+    if not isinstance(pub, (bytes, bytearray)) or len(pub) != 65 or bytes(pub)[0] != 0x04:
+        raise ValueError("p256 public key must be SEC1 uncompressed 65 bytes")
+    try:
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), bytes(pub))
+    except Exception as exc:
+        raise ValueError("invalid p256 public key encoding") from exc
+    b64 = base64.urlsafe_b64encode(bytes(pub)).decode("ascii").rstrip("=")
+    return "agent:v2:pk:p256:" + b64
+
+
 def parse_agent_id(id: str) -> tuple[str, bytes]:
     parts = id.split(":")
-    if len(parts) != 4:
-        raise ValueError("invalid agent id format")
-    if parts[0] != "agent" or parts[1] != "pk":
-        raise ValueError("invalid agent id prefix")
-    if parts[2] != "ed25519":
-        raise ValueError("unsupported algorithm")
-    encoded = parts[3]
-    if not encoded:
-        raise ValueError("missing public key")
-    if "=" in encoded:
-        raise ValueError("invalid base64url padding")
-    if re.fullmatch(r"[A-Za-z0-9_-]+", encoded) is None:
-        raise ValueError("invalid base64url public key")
-    pad_len = (4 - (len(encoded) % 4)) % 4
-    try:
-        pub = base64.urlsafe_b64decode(encoded + ("=" * pad_len))
-    except Exception as exc:
-        raise ValueError("invalid base64url public key") from exc
-    if len(pub) != 32:
-        raise ValueError("invalid ed25519 public key length")
-    return "ed25519", pub
+    if len(parts) == 4:
+        if parts[0] != "agent" or parts[1] != "pk":
+            raise ValueError("invalid agent id prefix")
+        if parts[2] != "ed25519":
+            raise ValueError("unsupported algorithm")
+        pub = _decode_base64url_no_padding(parts[3], "public key")
+        if len(pub) != 32:
+            raise ValueError("invalid ed25519 public key length")
+        return "ed25519", pub
+    if len(parts) == 5:
+        _require_crypto_backend()
+        if parts[0] != "agent" or parts[1] != "v2" or parts[2] != "pk":
+            raise ValueError("invalid agent id prefix")
+        if parts[3] != "p256":
+            raise ValueError("unsupported algorithm")
+        pub = _decode_base64url_no_padding(parts[4], "public key")
+        if len(pub) != 65 or pub[0] != 0x04:
+            raise ValueError("invalid p256 public key encoding")
+        try:
+            ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pub)
+        except Exception as exc:
+            raise ValueError("invalid p256 public key encoding") from exc
+        return "p256", pub
+    raise ValueError("invalid agent id format")
 
 
 def is_valid_agent_id(id: str) -> bool:
@@ -619,6 +737,23 @@ def _validate_base64url_no_padding(value: str, field_name: str) -> None:
         base64.urlsafe_b64decode(value + ("=" * pad_len))
     except Exception as exc:
         raise ValueError(f"{field_name} must be base64url without padding") from exc
+
+
+def _decode_base64url_no_padding(value: str, field_name: str) -> bytes:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"missing {field_name}")
+    if "=" in value:
+        raise ValueError("invalid base64url padding")
+    if re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+        raise ValueError(f"invalid base64url {field_name}")
+    pad_len = (4 - (len(value) % 4)) % 4
+    try:
+        decoded = base64.urlsafe_b64decode(value + ("=" * pad_len))
+    except Exception as exc:
+        raise ValueError(f"invalid base64url {field_name}") from exc
+    if base64.urlsafe_b64encode(decoded).decode("ascii").rstrip("=") != value:
+        raise ValueError(f"invalid base64url {field_name}")
+    return decoded
 
 
 def _validate_commerce_intent_v1(intent: Dict[str, Any]) -> Dict[str, Any]:
@@ -697,26 +832,20 @@ def sign_commerce_intent_v1(intent: Dict[str, Any], signing_key: bytes, issued_a
     )
 
 
+def sign_commerce_intent_v1_es256(intent: Dict[str, Any], signing_key: Any, issued_at: str) -> Dict[str, Any]:
+    normalized = _validate_commerce_intent_v1(dict(intent))
+    issued_dt = _parse_rfc3339_utc(issued_at, "issued_at")
+    return build_signature_envelope_v2(
+        payload=normalized,
+        signing_key=signing_key,
+        issued_at=issued_dt,
+        context="commerce-intent",
+    )
+
+
 def verify_commerce_intent_v1(intent: Dict[str, Any], sig: Dict[str, Any]) -> None:
     normalized = _validate_commerce_intent_v1(dict(intent))
-    if sig.get("version") != "sig-v1":
-        raise ValueError("signature_envelope version must be sig-v1")
-    if sig.get("algorithm") != "ed25519":
-        raise ValueError("signature_envelope algorithm must be ed25519")
-    if "context" in sig and sig.get("context") != "commerce-intent":
-        raise ValueError("signature context mismatch")
-    _parse_rfc3339_utc(str(sig.get("issued_at", "")), "issued_at")
-    expected_hash = hash_commerce_intent_v1(normalized)
-    if sig.get("payload_hash") != expected_hash:
-        raise ValueError("payload hash mismatch")
-    try:
-        pub = base64.b64decode(str(sig.get("public_key", "")))
-        signature = base64.b64decode(str(sig.get("signature", "")))
-    except Exception as exc:
-        raise ValueError("invalid signature encoding") from exc
-    if len(pub) != 32 or len(signature) != 64:
-        raise ValueError("invalid signature encoding")
-    VerifyKey(pub).verify(bytes.fromhex(expected_hash), signature)
+    _verify_signature_envelope(normalized, sig, "commerce-intent")
 
 
 def hash_commerce_accept_v1(acc: Dict[str, Any]) -> str:
@@ -735,26 +864,20 @@ def sign_commerce_accept_v1(acc: Dict[str, Any], signing_key: bytes, issued_at: 
     )
 
 
+def sign_commerce_accept_v1_es256(acc: Dict[str, Any], signing_key: Any, issued_at: str) -> Dict[str, Any]:
+    normalized = _validate_commerce_accept_v1(dict(acc))
+    issued_dt = _parse_rfc3339_utc(issued_at, "issued_at")
+    return build_signature_envelope_v2(
+        payload=normalized,
+        signing_key=signing_key,
+        issued_at=issued_dt,
+        context="commerce-accept",
+    )
+
+
 def verify_commerce_accept_v1(acc: Dict[str, Any], sig: Dict[str, Any]) -> None:
     normalized = _validate_commerce_accept_v1(dict(acc))
-    if sig.get("version") != "sig-v1":
-        raise ValueError("signature_envelope version must be sig-v1")
-    if sig.get("algorithm") != "ed25519":
-        raise ValueError("signature_envelope algorithm must be ed25519")
-    if "context" in sig and sig.get("context") != "commerce-accept":
-        raise ValueError("signature context mismatch")
-    _parse_rfc3339_utc(str(sig.get("issued_at", "")), "issued_at")
-    expected_hash = hash_commerce_accept_v1(normalized)
-    if sig.get("payload_hash") != expected_hash:
-        raise ValueError("payload hash mismatch")
-    try:
-        pub = base64.b64decode(str(sig.get("public_key", "")))
-        signature = base64.b64decode(str(sig.get("signature", "")))
-    except Exception as exc:
-        raise ValueError("invalid signature encoding") from exc
-    if len(pub) != 32 or len(signature) != 64:
-        raise ValueError("invalid signature encoding")
-    VerifyKey(pub).verify(bytes.fromhex(expected_hash), signature)
+    _verify_signature_envelope(normalized, sig, "commerce-accept")
 
 
 _DELEGATION_ALLOWED_TOP_LEVEL_KEYS = {
@@ -898,27 +1021,21 @@ def sign_delegation_v1(payload: Dict[str, Any], signing_key: bytes, issued_at: s
     )
 
 
+def sign_delegation_v1_es256(payload: Dict[str, Any], signing_key: Any, issued_at: str) -> Dict[str, Any]:
+    normalized = _validate_delegation_v1(dict(payload))
+    issued_dt = _parse_rfc3339_utc(issued_at, "issued_at")
+    return build_signature_envelope_v2(
+        payload=normalized,
+        signing_key=signing_key,
+        issued_at=issued_dt,
+        context="delegation",
+    )
+
+
 def verify_delegation_v1(payload: Dict[str, Any], sig: Dict[str, Any]) -> None:
     normalized = _validate_delegation_v1(dict(payload))
-    if sig.get("version") != "sig-v1":
-        raise ValueError("signature_envelope version must be sig-v1")
-    if sig.get("algorithm") != "ed25519":
-        raise ValueError("signature_envelope algorithm must be ed25519")
-    if "context" in sig and sig.get("context") != "delegation":
-        raise ValueError("signature context mismatch")
-    _parse_rfc3339_utc(str(sig.get("issued_at", "")), "issued_at")
-    expected_hash = hash_delegation_v1(normalized)
-    if sig.get("payload_hash") != expected_hash:
-        raise ValueError("payload hash mismatch")
-    try:
-        pub = base64.b64decode(str(sig.get("public_key", "")))
-        signature = base64.b64decode(str(sig.get("signature", "")))
-    except Exception as exc:
-        raise ValueError("invalid signature encoding") from exc
-    if len(pub) != 32 or len(signature) != 64:
-        raise ValueError("invalid signature encoding")
-    VerifyKey(pub).verify(bytes.fromhex(expected_hash), signature)
-    issuer = agent_id_from_public_key(pub)
+    _verify_signature_envelope(normalized, sig, "delegation")
+    issuer = _agent_id_from_signature_envelope(sig)
     if issuer != normalized["issuer_agent"]:
         raise ValueError("signature public key does not match issuer_agent")
 
@@ -1013,6 +1130,46 @@ def parse_sig_v1(sig: Dict[str, Any], expected_context: Optional[str] = None) ->
     if len(pub) != 32 or len(signature) != 64:
         raise ValueError("invalid signature encoding")
     return sig
+
+
+def parse_sig_v2(sig: Dict[str, Any], expected_context: Optional[str] = None) -> Dict[str, Any]:
+    _require_crypto_backend()
+    if not isinstance(sig, dict):
+        raise ValueError("signature_envelope must be object")
+    allowed = {"version", "algorithm", "public_key", "signature", "payload_hash", "issued_at", "key_id", "context"}
+    unknown = set(sig.keys()) - allowed
+    if unknown:
+        raise ValueError(f"unknown signature keys: {sorted(unknown)}")
+    if sig.get("version") != "sig-v2":
+        raise ValueError("signature_envelope version must be sig-v2")
+    if sig.get("algorithm") != "es256":
+        raise ValueError("signature_envelope algorithm must be es256")
+    payload_hash = str(sig.get("payload_hash", ""))
+    if re.fullmatch(r"[0-9a-f]{64}", payload_hash) is None:
+        raise ValueError("payload_hash must be lowercase hex sha256")
+    _parse_rfc3339_utc(str(sig.get("issued_at", "")), "issued_at")
+    if expected_context and sig.get("context") not in (None, "", expected_context):
+        raise ValueError("signature context mismatch")
+    pub = _decode_base64url_no_padding(str(sig.get("public_key", "")), "signature public key")
+    if len(pub) != 65 or pub[0] != 0x04:
+        raise ValueError("invalid signature public_key encoding")
+    try:
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pub)
+    except Exception as exc:
+        raise ValueError("invalid signature public_key encoding") from exc
+    raw_sig = _decode_base64url_no_padding(str(sig.get("signature", "")), "signature")
+    if len(raw_sig) != 64:
+        raise ValueError("invalid signature encoding")
+    return sig
+
+
+def parse_signature_envelope(sig: Dict[str, Any], expected_context: Optional[str] = None) -> Dict[str, Any]:
+    version = str((sig or {}).get("version", ""))
+    if version == "sig-v1":
+        return parse_sig_v1(sig, expected_context)
+    if version == "sig-v2":
+        return parse_sig_v2(sig, expected_context)
+    raise ValueError("signature_envelope version must be sig-v1 or sig-v2")
 
 
 def normalize_amount_v1(currency: str, minor_units: int) -> Dict[str, str]:
@@ -1210,6 +1367,77 @@ def sig_v1_sign(context: str, payload_hash: str, signing_key: bytes, issued_at: 
     if key_id:
         env["key_id"] = key_id
     return env
+
+
+def sig_v2_sign(context: str, payload_hash: str, signing_key: Any, issued_at: str, key_id: Optional[str] = None) -> Dict[str, Any]:
+    _require_crypto_backend()
+    if re.fullmatch(r"[0-9a-f]{64}", str(payload_hash)) is None:
+        raise ValueError("payload_hash must be lowercase hex sha256")
+    issued_dt = _parse_rfc3339_utc(issued_at, "issued_at")
+    key = _load_es256_private_key(signing_key)
+    sig_der = key.sign(bytes.fromhex(payload_hash), ec.ECDSA(Prehashed(hashes.SHA256())))
+    r, s = decode_dss_signature(sig_der)
+    sig_raw = int(r).to_bytes(32, "big") + int(s).to_bytes(32, "big")
+    pub = key.public_key().public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.UncompressedPoint,
+    )
+    env: Dict[str, Any] = {
+        "version": "sig-v2",
+        "algorithm": "es256",
+        "public_key": base64.urlsafe_b64encode(pub).decode("ascii").rstrip("="),
+        "signature": base64.urlsafe_b64encode(sig_raw).decode("ascii").rstrip("="),
+        "payload_hash": str(payload_hash),
+        "issued_at": _format_issued_at_utc(issued_dt),
+        "context": context,
+    }
+    if key_id:
+        env["key_id"] = key_id
+    return env
+
+
+def _agent_id_from_signature_envelope(sig: Dict[str, Any]) -> str:
+    algo = str(sig.get("algorithm", "")).strip()
+    if algo == "ed25519":
+        pub = base64.b64decode(str(sig.get("public_key", "")))
+        return agent_id_from_public_key(pub)
+    if algo == "es256":
+        pub = _decode_base64url_no_padding(str(sig.get("public_key", "")), "signature public key")
+        return agent_id_v2_from_p256_public_key(pub)
+    raise ValueError("unsupported signature algorithm")
+
+
+def _verify_signature_envelope(payload: Dict[str, Any], sig: Dict[str, Any], expected_context: Optional[str]) -> None:
+    parsed = parse_signature_envelope(sig, expected_context)
+    expected_hash = _canonical_sha256_hex(payload)
+    if parsed.get("payload_hash") != expected_hash:
+        raise ValueError("payload hash mismatch")
+    message = bytes.fromhex(expected_hash)
+
+    if parsed.get("version") == "sig-v1":
+        pub = base64.b64decode(str(parsed.get("public_key", "")))
+        signature = base64.b64decode(str(parsed.get("signature", "")))
+        VerifyKey(pub).verify(message, signature)
+        return
+
+    pub_bytes = _decode_base64url_no_padding(str(parsed.get("public_key", "")), "signature public key")
+    _require_crypto_backend()
+    public_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pub_bytes)
+    sig_text = str(parsed.get("signature", ""))
+    try:
+        sig_raw = _decode_base64url_no_padding(sig_text, "signature")
+        if len(sig_raw) != 64:
+            raise ValueError("invalid signature encoding")
+        r = int.from_bytes(sig_raw[:32], "big")
+        s = int.from_bytes(sig_raw[32:], "big")
+        sig_der = encode_dss_signature(r, s)
+    except Exception:
+        # compatibility path: accept DER in base64 from API boundaries
+        sig_der = base64.b64decode(sig_text)
+    try:
+        public_key.verify(sig_der, message, ec.ECDSA(Prehashed(hashes.SHA256())))
+    except CryptoInvalidSignature as exc:
+        raise ValueError("invalid signature") from exc
 
 
 def compute_proof_id(proof_bundle_v1: Dict[str, Any]) -> str:

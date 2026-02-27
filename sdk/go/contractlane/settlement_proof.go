@@ -1,7 +1,6 @@
 package contractlane
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -335,12 +334,8 @@ func findAcceptByIntentHash(artifacts map[string]any, intentHash string) (Commer
 	return CommerceAcceptV1{}, SigV1Envelope{}, errors.New("intent_hash not found in commerce_accepts")
 }
 
-func ensureSignaturePubKeyMatchesAgent(sig SigV1Envelope, expectedAgentID string) error {
-	pub, err := base64.StdEncoding.DecodeString(sig.PublicKey)
-	if err != nil {
-		return errors.New("invalid signature public_key encoding")
-	}
-	agentID, err := AgentIDFromEd25519PublicKey(pub)
+func ensureSignaturePubKeyMatchesAgent(sig SigEnvelope, expectedAgentID string) error {
+	agentID, err := AgentIDFromSignatureEnvelope(sig)
 	if err != nil {
 		return err
 	}

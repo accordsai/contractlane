@@ -1,6 +1,7 @@
 package contractlane
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
@@ -15,6 +16,8 @@ import (
 var base64URLNoPaddingPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 type SigV1Envelope = SignatureEnvelopeV1
+type SigV2Envelope = SignatureEnvelopeV2
+type SigEnvelope = SignatureEnvelope
 
 type CommerceAmountV1 struct {
 	Currency string `json:"currency"`
@@ -66,6 +69,14 @@ func SignCommerceIntentV1(intent CommerceIntentV1, priv ed25519.PrivateKey, issu
 	return SignSigV1Ed25519(commerceIntentPayload(n), priv, issuedAt, "commerce-intent")
 }
 
+func SignCommerceIntentV1ES256(intent CommerceIntentV1, priv *ecdsa.PrivateKey, issuedAt time.Time) (SigV2Envelope, error) {
+	n, err := normalizeCommerceIntent(intent)
+	if err != nil {
+		return SigV2Envelope{}, err
+	}
+	return SignSigV2ES256(commerceIntentPayload(n), priv, issuedAt, "commerce-intent")
+}
+
 func VerifyCommerceIntentV1(intent CommerceIntentV1, sig SigV1Envelope) error {
 	_, err := validateCommerceIntentSubmission(intent, sig)
 	return err
@@ -86,6 +97,14 @@ func SignCommerceAcceptV1(acc CommerceAcceptV1, priv ed25519.PrivateKey, issuedA
 		return SigV1Envelope{}, err
 	}
 	return SignSigV1Ed25519(commerceAcceptPayload(n), priv, issuedAt, "commerce-accept")
+}
+
+func SignCommerceAcceptV1ES256(acc CommerceAcceptV1, priv *ecdsa.PrivateKey, issuedAt time.Time) (SigV2Envelope, error) {
+	n, err := normalizeCommerceAccept(acc)
+	if err != nil {
+		return SigV2Envelope{}, err
+	}
+	return SignSigV2ES256(commerceAcceptPayload(n), priv, issuedAt, "commerce-accept")
 }
 
 func VerifyCommerceAcceptV1(acc CommerceAcceptV1, sig SigV1Envelope) error {

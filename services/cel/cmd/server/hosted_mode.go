@@ -319,8 +319,8 @@ func buildCapabilitiesResponse(cfg hostedModeConfig) capabilitiesResponse {
 			AlwaysPresentArtifacts: []string{"anchors", "webhook_receipts"},
 		},
 		Signatures: signaturesInfo{
-			Envelopes:  []string{"sig-v1"},
-			Algorithms: []string{"ed25519"},
+			Envelopes:  []string{"sig-v1", "sig-v2"},
+			Algorithms: []string{"ed25519", "es256"},
 		},
 		Features: featuresInfo{
 			Webhooks:       true,

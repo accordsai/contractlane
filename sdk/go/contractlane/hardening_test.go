@@ -1,6 +1,10 @@
 package contractlane
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"strings"
@@ -36,6 +40,52 @@ func TestParseSigV1EnvelopeV1Strict_RejectsNonUTC(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestParseSigV2EnvelopeV2Strict_HappyPath(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	pub := elliptic.Marshal(elliptic.P256(), priv.PublicKey.X, priv.PublicKey.Y)
+	env, err := SigV2Sign("contract-action", strings.Repeat("a", 64), priv, time.Date(2026, 2, 20, 1, 2, 3, 0, time.UTC), "kid_v2")
+	if err != nil {
+		t.Fatalf("SigV2Sign: %v", err)
+	}
+	parsed, err := ParseSigV2EnvelopeV2Strict(map[string]any{
+		"version":      "sig-v2",
+		"algorithm":    "es256",
+		"public_key":   base64.RawURLEncoding.EncodeToString(pub),
+		"signature":    env.Signature,
+		"payload_hash": env.PayloadHash,
+		"issued_at":    env.IssuedAt,
+		"context":      env.Context,
+		"key_id":       env.KeyID,
+	})
+	if err != nil {
+		t.Fatalf("ParseSigV2EnvelopeV2Strict: %v", err)
+	}
+	if parsed.Version != "sig-v2" || parsed.Algorithm != "es256" {
+		t.Fatalf("unexpected parsed envelope: %+v", parsed)
+	}
+}
+
+func TestSigV2Sign_ProducesVerifiableEnvelope(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	payload := map[string]any{"a": 1, "b": "x"}
+	env, err := SignSigV2ES256(payload, priv, time.Date(2026, 2, 20, 1, 2, 3, 0, time.UTC), "contract-action")
+	if err != nil {
+		t.Fatalf("SignSigV2ES256: %v", err)
+	}
+	if env.Version != "sig-v2" || env.Algorithm != "es256" {
+		t.Fatalf("unexpected v2 envelope: %+v", env)
+	}
+	if _, err := VerifySignatureEnvelope(payload, env); err != nil {
+		t.Fatalf("VerifySignatureEnvelope: %v", err)
 	}
 }
 

@@ -1893,7 +1893,7 @@ func main() {
 				SignedPayload     map[string]any         `json:"signed_payload"`
 				SignedPayloadHash string                 `json:"signed_payload_hash"`
 				Signature         map[string]any         `json:"signature"`
-				SignatureEnvelope signaturev1.EnvelopeV1 `json:"signature_envelope"`
+				SignatureEnvelope signaturev1.Envelope   `json:"signature_envelope"`
 			}
 			if err := httpx.ReadJSON(r, &req); err != nil {
 				httpx.WriteError(w, 400, "BAD_JSON", err.Error(), nil)
@@ -1935,7 +1935,7 @@ func main() {
 					httpx.WriteError(w, 403, "BAD_SIGNATURE", "signature envelope context must be contract-action", nil)
 					return
 				}
-				if _, err := signaturev1.VerifyEnvelopeV1(req.SignedPayload, req.SignatureEnvelope); err != nil {
+				if _, err := signaturev1.VerifyEnvelope(req.SignedPayload, req.SignatureEnvelope); err != nil {
 					httpx.WriteError(w, 403, "BAD_SIGNATURE", "signature envelope verification failed", map[string]any{"reason": err.Error()})
 					return
 				}
@@ -3300,7 +3300,7 @@ func normalizeHexHash(v string) string {
 	return s
 }
 
-func signatureEnvelopeToMap(env signaturev1.EnvelopeV1) map[string]any {
+func signatureEnvelopeToMap(env signaturev1.Envelope) map[string]any {
 	out := map[string]any{
 		"version":      env.Version,
 		"algorithm":    env.Algorithm,

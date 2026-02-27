@@ -1,0 +1,5 @@
+{
+  "name": "sig_v2_approval_happy_path",
+  "description": "Approval decision with sig-v2/es256 signature envelope succeeds."
+}
+

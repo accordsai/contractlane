@@ -1,4 +1,4 @@
-import { createHmac, createHash, randomUUID, randomBytes } from 'crypto';
+import { createHmac, createHash, randomUUID, randomBytes, sign as cryptoSign, verify as cryptoVerify, createPrivateKey, createPublicKey, KeyObject } from 'crypto';
 import nacl from 'tweetnacl';
 
 export const API_VERSION = 'v1';
@@ -150,6 +150,17 @@ export type SignatureEnvelopeV1 = {
   context?: string;
   key_id?: string;
 };
+export type SignatureEnvelopeV2 = {
+  version: 'sig-v2';
+  algorithm: 'es256';
+  public_key: string; // base64url no padding SEC1 uncompressed P-256 pubkey
+  signature: string; // base64url no padding raw64 r||s
+  payload_hash: string;
+  issued_at: string;
+  context?: string;
+  key_id?: string;
+};
+export type SignatureEnvelope = SignatureEnvelopeV1 | SignatureEnvelopeV2;
 export type DelegationRevocationV1 = {
   version: 'delegation-revocation-v1';
   revocation_id: string;
@@ -191,7 +202,7 @@ export type ApprovalDecideInput = {
   signed_payload: Record<string, unknown>;
   signed_payload_hash?: string;
   signature?: Record<string, unknown>;
-  signature_envelope?: SignatureEnvelopeV1;
+  signature_envelope?: SignatureEnvelope;
 };
 export type ContractRender = {
   contract_id: string;
@@ -298,7 +309,8 @@ export class ContractLaneClient {
   private headers: Record<string, string>;
   private userAgentSuffix?: string;
   private fetchFn: typeof fetch;
-  private signingKey?: Uint8Array;
+  private signingKeyEd25519?: Uint8Array;
+  private signingKeyES256?: string | Buffer | KeyObject;
   private signingContext: string = 'contract-action';
   private keyId?: string;
   private disableCapabilityCheck: boolean;
@@ -497,7 +509,17 @@ export class ContractLaneClient {
     if (!secretKey || secretKey.length !== 64) {
       throw new Error('ed25519 secretKey must be 64 bytes (tweetnacl format)');
     }
-    this.signingKey = secretKey;
+    this.signingKeyEd25519 = secretKey;
+    this.signingKeyES256 = undefined;
+    this.keyId = keyId;
+  }
+
+  setSigningKeyES256(privateKey: string | Buffer | KeyObject, keyId?: string): void {
+    if (!privateKey) {
+      throw new Error('es256 private key is required');
+    }
+    this.signingKeyES256 = privateKey;
+    this.signingKeyEd25519 = undefined;
     this.keyId = keyId;
   }
 
@@ -539,6 +561,29 @@ export class ContractLaneClient {
     }
   }
 
+  async requireProtocolV2ES256(): Promise<void> {
+    const caps = await this.fetchCapabilities();
+    const missing: string[] = [];
+    const protocolName = caps.protocol?.name;
+    const protocolVersions = caps.protocol?.versions ?? [];
+    const evidenceBundleVersions = caps.evidence?.bundle_versions ?? [];
+    const evidenceAlwaysPresent = caps.evidence?.always_present_artifacts ?? [];
+    const signatureEnvelopes = caps.signatures?.envelopes ?? [];
+    const signatureAlgorithms = caps.signatures?.algorithms ?? [];
+
+    if (protocolName !== 'contractlane') missing.push('protocol.name:contractlane');
+    if (!protocolVersions.includes('v1')) missing.push('protocol.versions:v1');
+    if (!evidenceBundleVersions.includes('evidence-v1')) missing.push('evidence.bundle_versions:evidence-v1');
+    if (!signatureEnvelopes.includes('sig-v2')) missing.push('signatures.envelopes:sig-v2');
+    if (!signatureAlgorithms.includes('es256')) missing.push('signatures.algorithms:es256');
+    if (!evidenceAlwaysPresent.includes('anchors')) missing.push('evidence.always_present_artifacts:anchors');
+    if (!evidenceAlwaysPresent.includes('webhook_receipts')) missing.push('evidence.always_present_artifacts:webhook_receipts');
+
+    if (missing.length > 0) {
+      throw new IncompatibleNodeError(missing);
+    }
+  }
+
   async approvalDecide(approvalRequestId: string, input: ApprovalDecideInput): Promise<Record<string, unknown>> {
     const body: Record<string, unknown> = {
       actor_context: input.actor_context,
@@ -549,19 +594,20 @@ export class ContractLaneClient {
       body.signed_payload_hash = input.signed_payload_hash;
     }
 
-    if (this.signingKey && !input.signature_envelope) {
+    if (!input.signature_envelope && this.signingKeyEd25519) {
       if (!this.disableCapabilityCheck) {
         await this.requireProtocolV1();
       }
-      const env = buildSignatureEnvelopeV1(
-        body.signed_payload,
-        this.signingKey,
-        new Date(),
-        this.signingContext,
-        this.keyId,
-      );
+      const env = buildSignatureEnvelopeV1(body.signed_payload, this.signingKeyEd25519, new Date(), this.signingContext, this.keyId);
       body.signature_envelope = env;
-      body.signed_payload_hash = canonicalSha256Hex(body.signed_payload);
+      body.signed_payload_hash = env.payload_hash;
+    } else if (!input.signature_envelope && this.signingKeyES256) {
+      if (!this.disableCapabilityCheck) {
+        await this.requireProtocolV2ES256();
+      }
+      const env = buildSignatureEnvelopeV2(body.signed_payload, this.signingKeyES256, new Date(), this.signingContext, this.keyId);
+      body.signature_envelope = env;
+      body.signed_payload_hash = env.payload_hash;
     } else if (input.signature_envelope) {
       body.signature_envelope = input.signature_envelope;
     } else {
@@ -686,21 +732,21 @@ function bytesToBase64URLNoPadding(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
-function base64URLNoPaddingToBytes(input: string): Uint8Array {
+function base64URLNoPaddingToBytes(input: string, field: string): Uint8Array {
   if (input.length === 0) {
-    throw new Error('missing public key');
+    throw new Error(`missing ${field}`);
   }
   if (input.includes('=')) {
     throw new Error('invalid base64url padding');
   }
   if (!/^[A-Za-z0-9_-]+$/.test(input)) {
-    throw new Error('invalid base64url public key');
+    throw new Error(`invalid base64url ${field}`);
   }
   const padLen = (4 - (input.length % 4)) % 4;
   const padded = input.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat(padLen);
   const decoded = Buffer.from(padded, 'base64');
   if (bytesToBase64URLNoPadding(decoded).replace(/=+$/g, '') !== input) {
-    throw new Error('invalid base64url public key');
+    throw new Error(`invalid base64url ${field}`);
   }
   return Uint8Array.from(decoded);
 }
@@ -712,22 +758,44 @@ export function agentIdFromPublicKey(pub: Uint8Array): string {
   return `agent:pk:ed25519:${bytesToBase64URLNoPadding(pub)}`;
 }
 
+export function agentIdV2FromP256PublicKey(pub: Uint8Array): string {
+  if (!pub || pub.length !== 65 || pub[0] !== 0x04) {
+    throw new Error('p256 public key must be SEC1 uncompressed 65 bytes');
+  }
+  p256PublicKeyFromSec1Uncompressed(pub);
+  return `agent:v2:pk:p256:${bytesToBase64URLNoPadding(pub)}`;
+}
+
 export function parseAgentId(id: string): { algo: string; publicKey: Uint8Array } {
   const parts = id.split(':');
-  if (parts.length !== 4) {
-    throw new Error('invalid agent id format');
+  if (parts.length === 4) {
+    if (parts[0] !== 'agent' || parts[1] !== 'pk') {
+      throw new Error('invalid agent id prefix');
+    }
+    if (parts[2] !== 'ed25519') {
+      throw new Error('unsupported algorithm');
+    }
+    const decoded = base64URLNoPaddingToBytes(parts[3], 'public key');
+    if (decoded.length !== 32) {
+      throw new Error('invalid ed25519 public key length');
+    }
+    return { algo: 'ed25519', publicKey: decoded };
   }
-  if (parts[0] !== 'agent' || parts[1] !== 'pk') {
-    throw new Error('invalid agent id prefix');
+  if (parts.length === 5) {
+    if (parts[0] !== 'agent' || parts[1] !== 'v2' || parts[2] !== 'pk') {
+      throw new Error('invalid agent id prefix');
+    }
+    if (parts[3] !== 'p256') {
+      throw new Error('unsupported algorithm');
+    }
+    const decoded = base64URLNoPaddingToBytes(parts[4], 'public key');
+    if (decoded.length !== 65 || decoded[0] !== 0x04) {
+      throw new Error('invalid p256 public key encoding');
+    }
+    p256PublicKeyFromSec1Uncompressed(decoded);
+    return { algo: 'p256', publicKey: decoded };
   }
-  if (parts[2] !== 'ed25519') {
-    throw new Error('unsupported algorithm');
-  }
-  const decoded = base64URLNoPaddingToBytes(parts[3]);
-  if (decoded.length !== 32) {
-    throw new Error('invalid ed25519 public key length');
-  }
-  return { algo: 'ed25519', publicKey: decoded };
+  throw new Error('invalid agent id format');
 }
 
 export function isValidAgentId(id: string): boolean {
@@ -753,7 +821,7 @@ function validateBase64URLNoPadding(v: string, field: string): void {
   if (!v || v.includes('=') || !/^[A-Za-z0-9_-]+$/.test(v)) {
     throw new Error(`${field} must be base64url without padding`);
   }
-  base64URLNoPaddingToBytes(v);
+  base64URLNoPaddingToBytes(v, field);
 }
 
 function normalizeCommerceIntentV1(intent: CommerceIntentV1): CommerceIntentV1 {
@@ -865,6 +933,29 @@ export function parseSigV1(sig: SignatureEnvelopeV1, expectedContext?: string): 
   return sig;
 }
 
+export function parseSigV2(sig: SignatureEnvelopeV2, expectedContext?: string): SignatureEnvelopeV2 {
+  const allowed = new Set(['version', 'algorithm', 'public_key', 'signature', 'payload_hash', 'issued_at', 'context', 'key_id']);
+  for (const k of Object.keys(sig as Record<string, unknown>)) if (!allowed.has(k)) throw new Error(`unknown signature key: ${k}`);
+  if (sig.version !== 'sig-v2') throw new Error('signature_envelope version must be sig-v2');
+  if (sig.algorithm !== 'es256') throw new Error('signature_envelope algorithm must be es256');
+  if (!/^[0-9a-f]{64}$/.test(sig.payload_hash)) throw new Error('payload_hash must be lowercase hex sha256');
+  parseRFC3339UTC(sig.issued_at, 'issued_at');
+  if (expectedContext && sig.context && sig.context !== expectedContext) throw new Error('signature context mismatch');
+  const pub = base64URLNoPaddingToBytes(sig.public_key, 'signature public key');
+  if (pub.length !== 65 || pub[0] !== 0x04) throw new Error('invalid signature public_key encoding');
+  p256PublicKeyFromSec1Uncompressed(pub);
+  const rawSig = base64URLNoPaddingToBytes(sig.signature, 'signature');
+  if (rawSig.length !== 64) throw new Error('invalid signature encoding');
+  return sig;
+}
+
+export function parseSignatureEnvelope(sig: SignatureEnvelope, expectedContext?: string): SignatureEnvelope {
+  if (!sig || typeof sig !== 'object') throw new Error('signature_envelope must be object');
+  if (sig.version === 'sig-v1') return parseSigV1(sig as SignatureEnvelopeV1, expectedContext);
+  if (sig.version === 'sig-v2') return parseSigV2(sig as SignatureEnvelopeV2, expectedContext);
+  throw new Error('signature_envelope version must be sig-v1 or sig-v2');
+}
+
 export function normalizeAmountV1(currency: string, minorUnits: number): CommerceAmountV1 {
   if (!Number.isInteger(minorUnits) || minorUnits < 0) throw new Error('minor units must be non-negative integer');
   const ccy = String(currency ?? '').trim().toUpperCase();
@@ -952,6 +1043,33 @@ export function sigV1Sign(context: string, payloadHash: string, secretKey: Uint8
   };
 }
 
+export function sigV2Sign(
+  context: string,
+  payloadHash: string,
+  privateKey: string | Buffer | KeyObject,
+  issuedAt: Date,
+  keyId?: string,
+): SignatureEnvelopeV2 {
+  if (!/^[0-9a-f]{64}$/.test(payloadHash)) throw new Error('payload_hash must be lowercase hex sha256');
+  if (!privateKey) throw new Error('es256 private key is required');
+  const keyObj = privateKey instanceof KeyObject ? privateKey : createPrivateKey(privateKey as any);
+  const msg = Buffer.from(payloadHash, 'hex');
+  const sigRaw = cryptoSign(null, msg, { key: keyObj, dsaEncoding: 'ieee-p1363' as const });
+  if (sigRaw.length !== 64) throw new Error('invalid es256 signature length');
+  const pubDer = createPublicKey(keyObj).export({ type: 'spki', format: 'der' }) as Buffer;
+  const sec1 = spkiP256ToSec1Uncompressed(pubDer);
+  return {
+    version: 'sig-v2',
+    algorithm: 'es256',
+    public_key: bytesToBase64URLNoPadding(sec1),
+    signature: bytesToBase64URLNoPadding(sigRaw),
+    payload_hash: payloadHash,
+    issued_at: issuedAt.toISOString(),
+    context,
+    ...(keyId ? { key_id: keyId } : {}),
+  };
+}
+
 export function parseProofBundleV1(proof: any): ProofBundleV1 {
   if (!proof || typeof proof !== 'object') throw new Error('proof bundle must be object');
   const allowed = new Set(['version', 'protocol', 'protocol_version', 'bundle']);
@@ -1018,19 +1136,17 @@ export function signDelegationV1(payload: DelegationV1, secretKey: Uint8Array, i
   return buildSignatureEnvelopeV1(normalized, secretKey, issuedAt, 'delegation');
 }
 
-export function verifyDelegationV1(payload: DelegationV1, sig: SignatureEnvelopeV1): void {
+export function signDelegationV1ES256(payload: DelegationV1, privateKey: string | Buffer | KeyObject, issuedAt: Date): SignatureEnvelopeV2 {
   const normalized = normalizeDelegationV1(payload);
-  if (sig.version !== 'sig-v1') throw new Error('signature_envelope version must be sig-v1');
-  if (sig.algorithm !== 'ed25519') throw new Error('signature_envelope algorithm must be ed25519');
-  if (sig.context && sig.context !== 'delegation') throw new Error('signature context mismatch');
-  parseRFC3339UTC(sig.issued_at, 'issued_at');
+  return buildSignatureEnvelopeV2(normalized, privateKey, issuedAt, 'delegation');
+}
+
+export function verifyDelegationV1(payload: DelegationV1, sig: SignatureEnvelope): void {
+  const normalized = normalizeDelegationV1(payload);
   const expected = hashDelegationV1(normalized);
+  verifySignatureEnvelope(normalized, sig, 'delegation');
   if (sig.payload_hash !== expected) throw new Error('payload hash mismatch');
-  const pub = Buffer.from(sig.public_key, 'base64');
-  const signature = Buffer.from(sig.signature, 'base64');
-  if (pub.length !== 32 || signature.length !== 64) throw new Error('invalid signature encoding');
-  if (!nacl.sign.detached.verify(hexToBytes(expected), signature, pub)) throw new Error('invalid signature');
-  if (agentIdFromPublicKey(pub) !== normalized.issuer_agent) throw new Error('signature public key does not match issuer_agent');
+  if (agentIdFromSignatureEnvelope(sig) !== normalized.issuer_agent) throw new Error('signature public key does not match issuer_agent');
 }
 
 export function evaluateDelegationConstraints(constraints: DelegationConstraintsV1, evalCtx: { contract_id: string; counterparty_agent: string; issued_at_utc: string; payment_amount?: CommerceAmountV1 }): void {
@@ -1069,19 +1185,16 @@ export function signCommerceIntentV1(intent: CommerceIntentV1, secretKey: Uint8A
   return buildSignatureEnvelopeV1(normalized, secretKey, issuedAt, 'commerce-intent');
 }
 
-export function verifyCommerceIntentV1(intent: CommerceIntentV1, sig: SignatureEnvelopeV1): void {
+export function signCommerceIntentV1ES256(intent: CommerceIntentV1, privateKey: string | Buffer | KeyObject, issuedAt: Date): SignatureEnvelopeV2 {
   const normalized = normalizeCommerceIntentV1(intent);
-  if (sig.version !== 'sig-v1') throw new Error('signature_envelope version must be sig-v1');
-  if (sig.algorithm !== 'ed25519') throw new Error('signature_envelope algorithm must be ed25519');
-  if (sig.context && sig.context !== 'commerce-intent') throw new Error('signature context mismatch');
-  parseRFC3339UTC(sig.issued_at, 'issued_at');
+  return buildSignatureEnvelopeV2(normalized, privateKey, issuedAt, 'commerce-intent');
+}
+
+export function verifyCommerceIntentV1(intent: CommerceIntentV1, sig: SignatureEnvelope): void {
+  const normalized = normalizeCommerceIntentV1(intent);
   const expectedHash = hashCommerceIntentV1(normalized);
   if (sig.payload_hash !== expectedHash) throw new Error('payload hash mismatch');
-  const pub = Buffer.from(sig.public_key, 'base64');
-  const signature = Buffer.from(sig.signature, 'base64');
-  if (pub.length !== 32 || signature.length !== 64) throw new Error('invalid signature encoding');
-  const ok = nacl.sign.detached.verify(hexToBytes(expectedHash), signature, pub);
-  if (!ok) throw new Error('invalid signature');
+  verifySignatureEnvelope(normalized, sig, 'commerce-intent');
 }
 
 export function hashCommerceAcceptV1(acc: CommerceAcceptV1): string {
@@ -1094,19 +1207,16 @@ export function signCommerceAcceptV1(acc: CommerceAcceptV1, secretKey: Uint8Arra
   return buildSignatureEnvelopeV1(normalized, secretKey, issuedAt, 'commerce-accept');
 }
 
-export function verifyCommerceAcceptV1(acc: CommerceAcceptV1, sig: SignatureEnvelopeV1): void {
+export function signCommerceAcceptV1ES256(acc: CommerceAcceptV1, privateKey: string | Buffer | KeyObject, issuedAt: Date): SignatureEnvelopeV2 {
   const normalized = normalizeCommerceAcceptV1(acc);
-  if (sig.version !== 'sig-v1') throw new Error('signature_envelope version must be sig-v1');
-  if (sig.algorithm !== 'ed25519') throw new Error('signature_envelope algorithm must be ed25519');
-  if (sig.context && sig.context !== 'commerce-accept') throw new Error('signature context mismatch');
-  parseRFC3339UTC(sig.issued_at, 'issued_at');
+  return buildSignatureEnvelopeV2(normalized, privateKey, issuedAt, 'commerce-accept');
+}
+
+export function verifyCommerceAcceptV1(acc: CommerceAcceptV1, sig: SignatureEnvelope): void {
+  const normalized = normalizeCommerceAcceptV1(acc);
   const expectedHash = hashCommerceAcceptV1(normalized);
   if (sig.payload_hash !== expectedHash) throw new Error('payload hash mismatch');
-  const pub = Buffer.from(sig.public_key, 'base64');
-  const signature = Buffer.from(sig.signature, 'base64');
-  if (pub.length !== 32 || signature.length !== 64) throw new Error('invalid signature encoding');
-  const ok = nacl.sign.detached.verify(hexToBytes(expectedHash), signature, pub);
-  if (!ok) throw new Error('invalid signature');
+  verifySignatureEnvelope(normalized, sig, 'commerce-accept');
 }
 
 export function buildSignatureEnvelopeV1(
@@ -1134,4 +1244,74 @@ export function buildSignatureEnvelopeV1(
     context,
     ...(keyId ? { key_id: keyId } : {}),
   };
+}
+
+export function buildSignatureEnvelopeV2(
+  payload: any,
+  privateKey: string | Buffer | KeyObject,
+  issuedAt: Date,
+  context: string = 'contract-action',
+  keyId?: string,
+): SignatureEnvelopeV2 {
+  const payloadHash = canonicalSha256Hex(payload);
+  return sigV2Sign(context, payloadHash, privateKey, issuedAt, keyId);
+}
+
+function spkiP256ToSec1Uncompressed(spkiDer: Buffer): Uint8Array {
+  // Minimal SPKI parser for EC P-256 keys produced by Node crypto.
+  const p256SpkiPrefix = Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex');
+  if (spkiDer.length === p256SpkiPrefix.length + 65 && spkiDer.subarray(0, p256SpkiPrefix.length).equals(p256SpkiPrefix)) {
+    const pub = spkiDer.subarray(p256SpkiPrefix.length);
+    if (pub.length === 65 && pub[0] === 0x04) return Uint8Array.from(pub);
+  }
+  throw new Error('invalid es256 public key encoding');
+}
+
+function p256PublicKeyFromSec1Uncompressed(sec1Pub: Uint8Array): KeyObject {
+  if (sec1Pub.length !== 65 || sec1Pub[0] !== 0x04) throw new Error('invalid signature public_key encoding');
+  const p256SpkiPrefix = Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex');
+  const der = Buffer.concat([p256SpkiPrefix, Buffer.from(sec1Pub)]);
+  return createPublicKey({ key: der, format: 'der', type: 'spki' });
+}
+
+function parseES256SignatureCompat(sig: string): { raw64?: Buffer; der?: Buffer } {
+  try {
+    const raw = Buffer.from(base64URLNoPaddingToBytes(sig, 'signature'));
+    if (raw.length === 64) return { raw64: raw };
+    throw new Error('invalid signature');
+  } catch {
+    // Compatibility path: accept DER in standard base64 from API boundary.
+    const der = Buffer.from(sig, 'base64');
+    if (!der.length) throw new Error('invalid signature encoding');
+    return { der };
+  }
+}
+
+function verifySignatureEnvelope(payload: any, sig: SignatureEnvelope, expectedContext?: string): void {
+  const parsed = parseSignatureEnvelope(sig, expectedContext);
+  const expectedHash = canonicalSha256Hex(payload);
+  if (parsed.payload_hash !== expectedHash) throw new Error('payload hash mismatch');
+  const msg = Buffer.from(expectedHash, 'hex');
+
+  if (parsed.version === 'sig-v1') {
+    const pub = Buffer.from(parsed.public_key, 'base64');
+    const signature = Buffer.from(parsed.signature, 'base64');
+    if (!nacl.sign.detached.verify(msg, signature, pub)) throw new Error('invalid signature');
+    return;
+  }
+
+  const pub = p256PublicKeyFromSec1Uncompressed(base64URLNoPaddingToBytes(parsed.public_key, 'signature public key'));
+  const sigCompat = parseES256SignatureCompat(parsed.signature);
+  if (sigCompat.raw64) {
+    if (!cryptoVerify(null, msg, { key: pub, dsaEncoding: 'ieee-p1363' }, sigCompat.raw64)) throw new Error('invalid signature');
+    return;
+  }
+  if (!sigCompat.der || !cryptoVerify(null, msg, pub, sigCompat.der)) throw new Error('invalid signature');
+}
+
+function agentIdFromSignatureEnvelope(sig: SignatureEnvelope): string {
+  if (sig.algorithm === 'ed25519') {
+    return agentIdFromPublicKey(Buffer.from(sig.public_key, 'base64'));
+  }
+  return agentIdV2FromP256PublicKey(base64URLNoPaddingToBytes(sig.public_key, 'signature public key'));
 }

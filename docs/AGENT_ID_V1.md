@@ -17,3 +17,8 @@ Canonical format:
 - Unsupported algorithm.
 - Invalid base64url.
 - Incorrect decoded key length.
+
+## Compatibility Notes
+
+- `agent-id-v1` remains Ed25519-only.
+- P-256 identities are additive via `agent-id-v2` (`docs/AGENT_ID_V2.md`).

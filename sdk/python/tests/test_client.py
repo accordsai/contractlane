@@ -6,22 +6,35 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
+try:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    HAS_CRYPTOGRAPHY = True
+except Exception:
+    serialization = None
+    ec = None
+    HAS_CRYPTOGRAPHY = False
+
 from contractlane.client import (
     ContractLaneClient,
     IncompatibleNodeError,
     PrincipalAuth,
     RetryConfig,
     agent_id_from_public_key,
+    agent_id_v2_from_p256_public_key,
     parse_agent_id,
     is_valid_agent_id,
     hash_commerce_intent_v1,
     sign_commerce_intent_v1,
+    sign_commerce_intent_v1_es256,
     verify_commerce_intent_v1,
     hash_commerce_accept_v1,
     sign_commerce_accept_v1,
     verify_commerce_accept_v1,
     hash_delegation_v1,
     sign_delegation_v1,
+    sign_delegation_v1_es256,
     verify_delegation_v1,
     evaluate_delegation_constraints,
     _canonical_sha256_hex,
@@ -30,6 +43,7 @@ from contractlane.client import (
     sha256_hex,
     canonical_sha256_hex,
     parse_sig_v1,
+    parse_sig_v2,
     parse_delegation_revocation_v1,
     parse_proof_bundle_v1,
     compute_proof_id,
@@ -203,6 +217,11 @@ def test_conformance_cases_exist():
         "error_model_401.json",
         "retry_429_then_success.json",
         "sig_v1_approval_happy_path.json",
+        "sig_v2_approval_happy_path.json",
+        "sig_v2_approval_bad_signature.json",
+        "delegation_v1_p256_sign_verify.json",
+        "mixed_signers_ed25519_p256_verify.json",
+        "sig_v2_invalid_encoding_rejects.json",
         "evidence_contains_anchors_and_receipts.json",
         "evp_verify_bundle_good.json",
         "agent_id_v1_roundtrip.json",
@@ -255,6 +274,26 @@ def test_agent_id_conformance_fixture():
         assert is_valid_agent_id(aid) is False
 
 
+@pytest.mark.skipif(not HAS_CRYPTOGRAPHY, reason="cryptography backend not installed")
+def test_agent_id_v2_p256_roundtrip_and_rejects_malformed_point():
+    priv = ec.generate_private_key(ec.SECP256R1())
+    pub = priv.public_key().public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.UncompressedPoint,
+    )
+    aid = agent_id_v2_from_p256_public_key(pub)
+    algo, parsed = parse_agent_id(aid)
+    assert algo == "p256"
+    assert parsed == pub
+    assert is_valid_agent_id(aid) is True
+
+    off_curve = bytes([0x04] + ([0] * 31 + [1]) + ([0] * 31 + [1]))
+    bad = "agent:v2:pk:p256:" + base64.urlsafe_b64encode(off_curve).decode("ascii").rstrip("=")
+    with pytest.raises(ValueError):
+        parse_agent_id(bad)
+    assert is_valid_agent_id(bad) is False
+
+
 def _fixed_intent() -> dict:
     return {
         "version": "commerce-intent-v1",
@@ -298,6 +337,20 @@ def test_commerce_intent_sign_verify():
         bytes([11] * 32),
         "2026-02-20T11:00:00Z",
     )
+    assert sig["context"] == "commerce-intent"
+    verify_commerce_intent_v1(_fixed_intent(), sig)
+
+
+@pytest.mark.skipif(not HAS_CRYPTOGRAPHY, reason="cryptography backend not installed")
+def test_commerce_intent_sign_verify_es256():
+    key = ec.generate_private_key(ec.SECP256R1())
+    sig = sign_commerce_intent_v1_es256(
+        _fixed_intent(),
+        key,
+        "2026-02-20T11:00:00Z",
+    )
+    assert sig["version"] == "sig-v2"
+    assert sig["algorithm"] == "es256"
     assert sig["context"] == "commerce-intent"
     verify_commerce_intent_v1(_fixed_intent(), sig)
 
@@ -379,6 +432,44 @@ def test_approval_decide_uses_sigv1_when_signing_key_configured():
     assert caps_hits["n"] == 1
 
 
+@pytest.mark.skipif(not HAS_CRYPTOGRAPHY, reason="cryptography backend not installed")
+def test_approval_decide_uses_sigv2_when_es256_key_configured():
+    captured = {}
+    caps_hits = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/cel/.well-known/contractlane":
+            caps_hits["n"] += 1
+            return httpx.Response(
+                200,
+                json={
+                    "protocol": {"name": "contractlane", "versions": ["v1"]},
+                    "evidence": {"bundle_versions": ["evidence-v1"], "always_present_artifacts": ["anchors", "webhook_receipts"]},
+                    "signatures": {"envelopes": ["sig-v1", "sig-v2"], "algorithms": ["ed25519", "es256"]},
+                },
+            )
+        captured["json"] = json.loads(req.content.decode("utf-8"))
+        return httpx.Response(200, json={"approval_request_id": "aprq_1", "status": "APPROVED"})
+
+    c = ContractLaneClient("http://x", PrincipalAuth("tok"))
+    c.http = httpx.Client(transport=httpx.MockTransport(handler))
+    c.set_signing_key_es256(ec.generate_private_key(ec.SECP256R1()), key_id="kid_py_es256")
+
+    out = c.approval_decide(
+        "aprq_1",
+        actor_context={"principal_id": "prn_1", "actor_id": "act_1", "actor_type": "HUMAN"},
+        decision="APPROVE",
+        signed_payload={"contract_id": "ctr_1", "approval_request_id": "aprq_1", "nonce": "n1"},
+    )
+    assert out["status"] == "APPROVED"
+    body = captured["json"]
+    assert "signature_envelope" in body
+    assert body["signature_envelope"]["version"] == "sig-v2"
+    assert body["signature_envelope"]["algorithm"] == "es256"
+    assert body.get("signed_payload_hash") == _canonical_sha256_hex(body["signed_payload"])
+    assert caps_hits["n"] == 1
+
+
 def test_approval_decide_legacy_fallback_without_key():
     captured = {}
 
@@ -438,6 +529,42 @@ def test_require_protocol_v1_fails_when_sig_v1_missing():
     assert "sig-v1" in str(ex.value)
 
 
+def test_require_protocol_v2_es256_passes_for_valid_capabilities():
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/cel/.well-known/contractlane"
+        return httpx.Response(
+            200,
+            json={
+                "protocol": {"name": "contractlane", "versions": ["v1"]},
+                "evidence": {"bundle_versions": ["evidence-v1"], "always_present_artifacts": ["anchors", "webhook_receipts"]},
+                "signatures": {"envelopes": ["sig-v1", "sig-v2"], "algorithms": ["ed25519", "es256"]},
+            },
+        )
+
+    c = ContractLaneClient("http://x", PrincipalAuth("tok"))
+    c.http = httpx.Client(transport=httpx.MockTransport(handler))
+    c.require_protocol_v2_es256()
+
+
+def test_require_protocol_v2_es256_fails_when_sig_v2_missing():
+    def handler(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/cel/.well-known/contractlane"
+        return httpx.Response(
+            200,
+            json={
+                "protocol": {"name": "contractlane", "versions": ["v1"]},
+                "evidence": {"bundle_versions": ["evidence-v1"], "always_present_artifacts": ["anchors", "webhook_receipts"]},
+                "signatures": {"envelopes": ["sig-v1"], "algorithms": ["ed25519"]},
+            },
+        )
+
+    c = ContractLaneClient("http://x", PrincipalAuth("tok"))
+    c.http = httpx.Client(transport=httpx.MockTransport(handler))
+    with pytest.raises(IncompatibleNodeError) as ex:
+        c.require_protocol_v2_es256()
+    assert "sig-v2" in str(ex.value)
+
+
 def test_approval_decide_disable_capability_check_skips_probe():
     captured = {}
     caps_hits = {"n": 0}
@@ -461,6 +588,17 @@ def test_approval_decide_disable_capability_check_skips_probe():
     assert out["status"] == "APPROVED"
     assert caps_hits["n"] == 0
     assert "signature_envelope" in captured["json"]
+
+
+@pytest.mark.skipif(not HAS_CRYPTOGRAPHY, reason="cryptography backend not installed")
+def test_parse_sig_v2_rejects_malformed_point():
+    key = ec.generate_private_key(ec.SECP256R1())
+    sig = sign_commerce_intent_v1_es256(_fixed_intent(), key, "2026-02-20T11:00:00Z")
+    bad = dict(sig)
+    off_curve = bytes([0x04] + ([0] * 31 + [1]) + ([0] * 31 + [1]))
+    bad["public_key"] = base64.urlsafe_b64encode(off_curve).decode("ascii").rstrip("=")
+    with pytest.raises(ValueError):
+        parse_sig_v2(bad)
 
 
 def _fixed_delegation() -> dict:
@@ -495,6 +633,23 @@ def test_delegation_v1_sign_verify():
     bad["context"] = "commerce-intent"
     with pytest.raises(ValueError):
         verify_delegation_v1(_fixed_delegation(), bad)
+
+
+@pytest.mark.skipif(not HAS_CRYPTOGRAPHY, reason="cryptography backend not installed")
+def test_delegation_v1_sign_verify_es256():
+    key = ec.generate_private_key(ec.SECP256R1())
+    payload = dict(_fixed_delegation())
+    pub = key.public_key().public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.UncompressedPoint,
+    )
+    issuer = agent_id_v2_from_p256_public_key(pub)
+    payload["issuer_agent"] = issuer
+    payload["subject_agent"] = issuer
+    sig = sign_delegation_v1_es256(payload, key, "2026-02-20T12:06:00Z")
+    assert sig["version"] == "sig-v2"
+    assert sig["algorithm"] == "es256"
+    verify_delegation_v1(payload, sig)
 
 
 def test_delegation_constraints_eval_failures():

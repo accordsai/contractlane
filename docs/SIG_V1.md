@@ -1,13 +1,13 @@
 # SIG_V1
 
-`sig-v1` is the protocol signature envelope.
+`sig-v1` is the frozen v1 signature envelope for Ed25519.
 
 ## Envelope
 
 Required fields:
 
 - `version` = `"sig-v1"`
-- `algorithm` (v1 requires `ed25519` for conformance)
+- `algorithm` = `"ed25519"`
 - `public_key` (base64, 32 bytes for ed25519)
 - `signature` (base64, 64 bytes for ed25519)
 - `payload_hash` (lowercase hex SHA-256, 64 chars)
@@ -29,3 +29,8 @@ Optional:
 - `commerce-accept`
 - `delegation`
 - `delegation-revocation`
+
+## Compatibility Notes
+
+- `sig-v1` semantics are unchanged and remain Ed25519-only.
+- P-256 support is additive via `sig-v2` (`docs/SIG_V2.md`).

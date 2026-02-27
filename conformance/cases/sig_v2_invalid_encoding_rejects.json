@@ -1,0 +1,5 @@
+{
+  "name": "sig_v2_invalid_encoding_rejects",
+  "description": "sig-v2/es256 verification rejects invalid key/signature encodings."
+}
+

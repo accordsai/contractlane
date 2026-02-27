@@ -1,0 +1,5 @@
+{
+  "name": "mixed_signers_ed25519_p256_verify",
+  "description": "Verification supports mixed environments with both ed25519/sig-v1 and es256/sig-v2 signatures."
+}
+

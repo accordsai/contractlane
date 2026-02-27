@@ -2,8 +2,8 @@ package contractlane
 
 import (
 	"bytes"
+	"crypto/ecdsa"
 	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/accordsai/contractlane/pkg/evidencehash"
-	signaturev1 "github.com/accordsai/contractlane/pkg/signature"
 )
 
 const (
@@ -66,7 +65,7 @@ type DelegationConstraintsV1 struct {
 
 type SignedDelegationV1 struct {
 	Delegation      DelegationV1  `json:"delegation"`
-	IssuerSignature SigV1Envelope `json:"issuer_signature"`
+	IssuerSignature SigEnvelope `json:"issuer_signature"`
 }
 
 type DelegationEvalContext struct {
@@ -107,7 +106,15 @@ func SignDelegationV1(payload DelegationV1, priv ed25519.PrivateKey, issuedAt ti
 	return SignSigV1Ed25519(delegationPayloadMap(n), priv, issuedAt, "delegation")
 }
 
-func VerifyDelegationV1(payload DelegationV1, sig SigV1Envelope) error {
+func SignDelegationV1ES256(payload DelegationV1, priv *ecdsa.PrivateKey, issuedAt time.Time) (SigV2Envelope, error) {
+	n, err := normalizeDelegationV1(payload)
+	if err != nil {
+		return SigV2Envelope{}, err
+	}
+	return SignSigV2ES256(delegationPayloadMap(n), priv, issuedAt, "delegation")
+}
+
+func VerifyDelegationV1(payload DelegationV1, sig SigEnvelope) error {
 	n, err := normalizeDelegationV1(payload)
 	if err != nil {
 		return err
@@ -122,24 +129,11 @@ func VerifyDelegationV1(payload DelegationV1, sig SigV1Envelope) error {
 	if strings.TrimSpace(sig.PayloadHash) != hash {
 		return errors.New("payload hash mismatch")
 	}
-	_, err = signaturev1.VerifyEnvelopeV1(delegationPayloadMap(n), signaturev1.EnvelopeV1{
-		Version:     sig.Version,
-		Algorithm:   sig.Algorithm,
-		PublicKey:   sig.PublicKey,
-		Signature:   sig.Signature,
-		PayloadHash: sig.PayloadHash,
-		IssuedAt:    sig.IssuedAt,
-		KeyID:       sig.KeyID,
-		Context:     sig.Context,
-	})
+	_, err = VerifySignatureEnvelope(delegationPayloadMap(n), sig)
 	if err != nil {
 		return err
 	}
-	pub, err := base64.StdEncoding.DecodeString(sig.PublicKey)
-	if err != nil {
-		return errors.New("invalid signature public_key encoding")
-	}
-	issuerAgentID, err := AgentIDFromEd25519PublicKey(pub)
+	issuerAgentID, err := AgentIDFromSignatureEnvelope(sig)
 	if err != nil {
 		return err
 	}
