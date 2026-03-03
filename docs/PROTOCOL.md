@@ -19,6 +19,7 @@ Additive post-freeze surfaces implemented without changing v1 semantics:
 
 - `sig-v2` (ES256 / P-256)
 - `agent-id-v2` (P-256 identity encoding)
+- `sig-v3` (WebAuthn ES256 for approval decide)
 
 ## Identifier Matrix (Authoritative)
 

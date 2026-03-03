@@ -2,8 +2,8 @@ package contractlane
 
 import (
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -90,4 +90,42 @@ func AgentIDFromSignatureEnvelope(env SignatureEnvelope) (string, error) {
 	default:
 		return "", errors.New("unsupported signature algorithm")
 	}
+}
+
+type SigV3VerifyOptions struct {
+	ExpectedContext         string
+	ExpectedChallengeBytes  []byte
+	AllowedOrigins          []string
+	ExpectedRPID            string
+	ExpectedCredentialID    string
+	CredentialPublicKeySec1 []byte
+	RequireUserPresence     bool
+	RequireUserVerification bool
+	PreviousSignCount       uint32
+}
+
+func VerifySignatureEnvelopeV3(payload any, env SignatureEnvelopeV3, opts SigV3VerifyOptions) (signaturev1.VerifyV3Result, error) {
+	return signaturev1.VerifyEnvelopeV3(payload, signaturev1.EnvelopeV3{
+		Version:           env.Version,
+		Algorithm:         env.Algorithm,
+		CredentialID:      env.CredentialID,
+		ChallengeID:       env.ChallengeID,
+		ClientDataJSON:    env.ClientDataJSON,
+		AuthenticatorData: env.AuthenticatorData,
+		Signature:         env.Signature,
+		PayloadHash:       env.PayloadHash,
+		IssuedAt:          env.IssuedAt,
+		KeyID:             env.KeyID,
+		Context:           env.Context,
+	}, signaturev1.VerifyEnvelopeV3Options{
+		ExpectedContext:         opts.ExpectedContext,
+		ExpectedChallengeBytes:  opts.ExpectedChallengeBytes,
+		AllowedOrigins:          opts.AllowedOrigins,
+		ExpectedRPID:            opts.ExpectedRPID,
+		ExpectedCredentialID:    opts.ExpectedCredentialID,
+		CredentialPublicKeySec1: opts.CredentialPublicKeySec1,
+		RequireUserPresence:     opts.RequireUserPresence,
+		RequireUserVerification: opts.RequireUserVerification,
+		PreviousSignCount:       opts.PreviousSignCount,
+	})
 }

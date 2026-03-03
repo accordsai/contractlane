@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, createHash, sign as cryptoSign } from 'node:crypto';
 import nacl from 'tweetnacl';
-import { ContractLaneClient, PrincipalAuth, AgentHmacAuth, IncompatibleNodeError, buildSignatureEnvelopeV1, canonicalSha256Hex, canonicalize, sha256Hex, parseSigV1, parseSigV2, agentIdFromPublicKey, agentIdV2FromP256PublicKey, parseAgentId, isValidAgentId, hashCommerceIntentV1, signCommerceIntentV1, signCommerceIntentV1ES256, verifyCommerceIntentV1, hashCommerceAcceptV1, signCommerceAcceptV1, verifyCommerceAcceptV1, hashDelegationV1, signDelegationV1, signDelegationV1ES256, verifyDelegationV1, evaluateDelegationConstraints, parseDelegationRevocationV1, computeProofId, verifyProofBundleV1 } from '../src/index.ts';
+import { ContractLaneClient, PrincipalAuth, AgentHmacAuth, IncompatibleNodeError, buildSignatureEnvelopeV1, canonicalSha256Hex, canonicalize, sha256Hex, parseSigV1, parseSigV2, parseSigV3, verifySigV3, agentIdFromPublicKey, agentIdV2FromP256PublicKey, parseAgentId, isValidAgentId, hashCommerceIntentV1, signCommerceIntentV1, signCommerceIntentV1ES256, verifyCommerceIntentV1, hashCommerceAcceptV1, signCommerceAcceptV1, verifyCommerceAcceptV1, hashDelegationV1, signDelegationV1, signDelegationV1ES256, verifyDelegationV1, evaluateDelegationConstraints, parseDelegationRevocationV1, computeProofId, verifyProofBundleV1 } from '../src/index.ts';
 
 test('gateResolve requires idempotency key', async () => {
   const client = new ContractLaneClient({ baseUrl: 'http://example.com', auth: new PrincipalAuth('tok'), fetchFn: async () => new Response('{}', { status: 200 }) as any });
@@ -425,6 +425,65 @@ test('parseSigV2 rejects malformed p256 public key', () => {
   assert.throws(() => parseSigV2({ ...sig, public_key: offCurve.toString('base64url') } as any));
 });
 
+test('parseSigV3 strict parsing works', () => {
+  const sig = {
+    version: 'sig-v3',
+    algorithm: 'webauthn-es256',
+    credential_id: Buffer.from('cred_1').toString('base64url'),
+    challenge_id: 'wch_1',
+    client_data_json: Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge: Buffer.from('abc').toString('base64url'), origin: 'https://app.example.com' })).toString('base64url'),
+    authenticator_data: Buffer.alloc(37, 0).toString('base64url'),
+    signature: Buffer.from('3006020101020101', 'hex').toString('base64url'),
+    payload_hash: 'a'.repeat(64),
+    issued_at: '2026-02-20T00:00:00Z',
+    context: 'contract-action',
+  } as any;
+  assert.equal(parseSigV3(sig, 'contract-action').version, 'sig-v3');
+});
+
+test('verifySigV3 happy path', () => {
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const payload = { contract_id: 'ctr_1', approval_request_id: 'aprq_1' };
+  const payloadHash = canonicalSha256Hex(payload);
+  const challengeB64 = Buffer.from('challenge_v3').toString('base64url');
+  const clientDataJSON = Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge: challengeB64, origin: 'https://app.example.com' }));
+  const rpHash = createHash('sha256').update('app.example.com').digest();
+  const authData = Buffer.alloc(37, 0);
+  rpHash.copy(authData, 0);
+  authData[32] = 0x01 | 0x04;
+  authData.writeUInt32BE(7, 33);
+  const signedData = Buffer.concat([authData, createHash('sha256').update(clientDataJSON).digest()]);
+  const sigDER = cryptoSign('sha256', signedData, privateKey);
+
+  const spki = publicKey.export({ type: 'spki', format: 'der' }) as Buffer;
+  const p256Prefix = Buffer.from('3059301306072a8648ce3d020106082a8648ce3d030107034200', 'hex');
+  const sec1Pub = spki.subarray(p256Prefix.length);
+
+  const sig = {
+    version: 'sig-v3',
+    algorithm: 'webauthn-es256',
+    credential_id: Buffer.from('cred_1').toString('base64url'),
+    challenge_id: 'wch_1',
+    client_data_json: clientDataJSON.toString('base64url'),
+    authenticator_data: authData.toString('base64url'),
+    signature: sigDER.toString('base64url'),
+    payload_hash: payloadHash,
+    issued_at: '2026-02-20T00:00:00Z',
+    context: 'contract-action',
+  } as any;
+
+  const out = verifySigV3(payload, sig, {
+    expectedContext: 'contract-action',
+    expectedChallengeB64URL: challengeB64,
+    allowedOrigins: ['https://app.example.com'],
+    expectedRPID: 'app.example.com',
+    expectedCredentialID: sig.credential_id,
+    credentialPublicKeySec1: sec1Pub,
+    previousSignCount: 1,
+  });
+  assert.equal(out.signCount, 7);
+});
+
 test('parseDelegationRevocationV1 rejects unknown key', () => {
   assert.throws(() =>
     parseDelegationRevocationV1({
@@ -547,6 +606,43 @@ test('approvalDecide sig-v2 default path passes with valid capabilities', async 
     actor_context: { principal_id: 'prn_1', actor_id: 'act_1', actor_type: 'HUMAN' },
     decision: 'APPROVE',
     signed_payload: { contract_id: 'ctr_1', approval_request_id: 'aprq_1', nonce: 'n1' },
+  }));
+  assert.equal(decideHits, 1);
+});
+
+test('approvalDecide sig-v3 provided envelope passes with valid capabilities', async () => {
+  let decideHits = 0;
+  const fetchFn: typeof fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith('/cel/.well-known/contractlane')) {
+      return new Response(JSON.stringify({
+        protocol: { name: 'contractlane', versions: ['v1'] },
+        evidence: { bundle_versions: ['evidence-v1'], always_present_artifacts: ['anchors', 'webhook_receipts'] },
+        signatures: { envelopes: ['sig-v1', 'sig-v2', 'sig-v3'], algorithms: ['ed25519', 'es256', 'webauthn-es256'] },
+        webauthn: { approval_sig_v3: true, uv_required: true },
+      }), { status: 200 }) as any;
+    }
+    decideHits++;
+    return new Response(JSON.stringify({ approval_request_id: 'aprq_1', status: 'APPROVED' }), { status: 200 }) as any;
+  };
+  const client = new ContractLaneClient({ baseUrl: 'http://example.com', auth: new PrincipalAuth('tok'), fetchFn });
+  const env = {
+    version: 'sig-v3',
+    algorithm: 'webauthn-es256',
+    credential_id: Buffer.from('cred_1').toString('base64url'),
+    challenge_id: 'wch_1',
+    client_data_json: Buffer.from(JSON.stringify({ type: 'webauthn.get', challenge: Buffer.from('abc').toString('base64url'), origin: 'https://app.example.com' })).toString('base64url'),
+    authenticator_data: Buffer.alloc(37, 0).toString('base64url'),
+    signature: Buffer.from('3006020101020101', 'hex').toString('base64url'),
+    payload_hash: 'a'.repeat(64),
+    issued_at: '2026-02-20T00:00:00Z',
+    context: 'contract-action',
+  } as any;
+  await assert.doesNotReject(async () => client.approvalDecide('aprq_1', {
+    actor_context: { principal_id: 'prn_1', actor_id: 'act_1', actor_type: 'HUMAN' },
+    decision: 'APPROVE',
+    signed_payload: { contract_id: 'ctr_1', approval_request_id: 'aprq_1', nonce: 'n1' },
+    signature_envelope: env,
   }));
   assert.equal(decideHits, 1);
 });

@@ -53,7 +53,7 @@ Call:
 
 If the response indicates approval is required, proceed to step 4.
 
-## 4) Decide Approval (sig-v1)
+## 4) Decide Approval (sig-v1 / sig-v2 / sig-v3)
 
 Call:
 
@@ -62,7 +62,12 @@ Call:
 Include:
 
 - `signed_payload`
-- `signature_envelope` (`sig-v1`, context `contract-action` when present)
+- `signature_envelope` (`sig-v1`, `sig-v2`, or `sig-v3`; context `contract-action` when present)
+
+For browser/human WebAuthn approvals (`sig-v3`), use:
+
+- `POST /ial/webauthn/assertions/start`
+- then submit resulting envelope to `POST /cel/approvals/{approval_request_id}:decide`
 
 ## 5) Fetch Evidence / Proof
 

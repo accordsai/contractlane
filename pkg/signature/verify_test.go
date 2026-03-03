@@ -5,8 +5,11 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -262,5 +265,94 @@ func TestVerifyEnvelopeV2_InvalidEncodingCases(t *testing.T) {
 	badSig.Signature = base64.RawURLEncoding.EncodeToString(sigRaw[:63])
 	if _, err := VerifyEnvelopeV2(payload, badSig); !errors.Is(err, ErrInvalidEncoding) {
 		t.Fatalf("expected ErrInvalidEncoding for short signature, got %v", err)
+	}
+}
+
+func TestVerifyEnvelopeV3_HappyPath(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	payload := map[string]any{"contract_id": "ctr_1", "approval_request_id": "aprq_1"}
+	hashHex, _, err := evidencehash.CanonicalSHA256(payload)
+	if err != nil {
+		t.Fatalf("CanonicalSHA256: %v", err)
+	}
+
+	challenge := []byte("challenge-bytes-v3-test")
+	clientData := map[string]any{
+		"type":      "webauthn.get",
+		"challenge": base64.RawURLEncoding.EncodeToString(challenge),
+		"origin":    "https://app.example.com",
+	}
+	clientDataBytes, _ := json.Marshal(clientData)
+	clientDataHash := sha256.Sum256(clientDataBytes)
+
+	rpHash := sha256.Sum256([]byte("app.example.com"))
+	authData := make([]byte, 37)
+	copy(authData[:32], rpHash[:])
+	authData[32] = 0x01 | 0x04
+	binary.BigEndian.PutUint32(authData[33:37], 9)
+
+	signedData := make([]byte, 0, len(authData)+len(clientDataHash))
+	signedData = append(signedData, authData...)
+	signedData = append(signedData, clientDataHash[:]...)
+	signedDigest := sha256.Sum256(signedData)
+	sigDER, err := ecdsa.SignASN1(rand.Reader, priv, signedDigest[:])
+	if err != nil {
+		t.Fatalf("SignASN1: %v", err)
+	}
+	pub := elliptic.Marshal(elliptic.P256(), priv.X, priv.Y)
+
+	env := EnvelopeV3{
+		Version:           "sig-v3",
+		Algorithm:         "webauthn-es256",
+		CredentialID:      base64.RawURLEncoding.EncodeToString([]byte("cred_1")),
+		ChallengeID:       "wch_1",
+		ClientDataJSON:    base64.RawURLEncoding.EncodeToString(clientDataBytes),
+		AuthenticatorData: base64.RawURLEncoding.EncodeToString(authData),
+		Signature:         base64.RawURLEncoding.EncodeToString(sigDER),
+		PayloadHash:       hashHex,
+		IssuedAt:          "2026-02-18T00:00:00Z",
+		Context:           "contract-action",
+	}
+	res, err := VerifyEnvelopeV3WithExpectedHash(hashHex, env, VerifyEnvelopeV3Options{
+		ExpectedContext:         "contract-action",
+		ExpectedChallengeBytes:  challenge,
+		AllowedOrigins:          []string{"https://app.example.com"},
+		ExpectedRPID:            "app.example.com",
+		ExpectedCredentialID:    env.CredentialID,
+		CredentialPublicKeySec1: pub,
+		RequireUserPresence:     true,
+		RequireUserVerification: true,
+		PreviousSignCount:       8,
+	})
+	if err != nil {
+		t.Fatalf("VerifyEnvelopeV3WithExpectedHash: %v", err)
+	}
+	if res.SignCount != 9 {
+		t.Fatalf("expected sign count 9, got %d", res.SignCount)
+	}
+}
+
+func TestVerifyEnvelopeV3_ChallengeMismatch(t *testing.T) {
+	env := EnvelopeV3{
+		Version:           "sig-v3",
+		Algorithm:         "webauthn-es256",
+		CredentialID:      base64.RawURLEncoding.EncodeToString([]byte("cred_1")),
+		ChallengeID:       "wch_1",
+		ClientDataJSON:    base64.RawURLEncoding.EncodeToString([]byte(`{"type":"webauthn.get","challenge":"YWJj","origin":"https://app.example.com"}`)),
+		AuthenticatorData: base64.RawURLEncoding.EncodeToString(make([]byte, 37)),
+		Signature:         base64.RawURLEncoding.EncodeToString([]byte{0x30, 0x03, 0x02, 0x01, 0x01}),
+		PayloadHash:       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		IssuedAt:          "2026-02-18T00:00:00Z",
+		Context:           "contract-action",
+	}
+	_, err := VerifyEnvelopeV3WithExpectedHash(env.PayloadHash, env, VerifyEnvelopeV3Options{
+		ExpectedChallengeBytes:  []byte("different"),
+		CredentialPublicKeySec1: []byte{0x04},
+	})
+	if err == nil {
+		t.Fatalf("expected error")
 	}
 }

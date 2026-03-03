@@ -16,6 +16,7 @@ exports.parseAgentId = parseAgentId;
 exports.isValidAgentId = isValidAgentId;
 exports.parseSigV1 = parseSigV1;
 exports.parseSigV2 = parseSigV2;
+exports.parseSigV3 = parseSigV3;
 exports.parseSignatureEnvelope = parseSignatureEnvelope;
 exports.normalizeAmountV1 = normalizeAmountV1;
 exports.parseAmountV1 = parseAmountV1;
@@ -45,6 +46,8 @@ exports.signCommerceAcceptV1ES256 = signCommerceAcceptV1ES256;
 exports.verifyCommerceAcceptV1 = verifyCommerceAcceptV1;
 exports.buildSignatureEnvelopeV1 = buildSignatureEnvelopeV1;
 exports.buildSignatureEnvelopeV2 = buildSignatureEnvelopeV2;
+exports.verifySigV3 = verifySigV3;
+exports.buildSigV3FromWebAuthnAssertion = buildSigV3FromWebAuthnAssertion;
 const crypto_1 = require("crypto");
 const tweetnacl_1 = __importDefault(require("tweetnacl"));
 exports.API_VERSION = 'v1';
@@ -360,6 +363,33 @@ class ContractLaneClient {
             throw new IncompatibleNodeError(missing);
         }
     }
+    async requireProtocolV3WebAuthn() {
+        const caps = await this.fetchCapabilities();
+        const missing = [];
+        const protocolName = caps.protocol?.name;
+        const protocolVersions = caps.protocol?.versions ?? [];
+        const evidenceBundleVersions = caps.evidence?.bundle_versions ?? [];
+        const evidenceAlwaysPresent = caps.evidence?.always_present_artifacts ?? [];
+        const signatureEnvelopes = caps.signatures?.envelopes ?? [];
+        const signatureAlgorithms = caps.signatures?.algorithms ?? [];
+        if (protocolName !== 'contractlane')
+            missing.push('protocol.name:contractlane');
+        if (!protocolVersions.includes('v1'))
+            missing.push('protocol.versions:v1');
+        if (!evidenceBundleVersions.includes('evidence-v1'))
+            missing.push('evidence.bundle_versions:evidence-v1');
+        if (!signatureEnvelopes.includes('sig-v3'))
+            missing.push('signatures.envelopes:sig-v3');
+        if (!signatureAlgorithms.includes('webauthn-es256'))
+            missing.push('signatures.algorithms:webauthn-es256');
+        if (!evidenceAlwaysPresent.includes('anchors'))
+            missing.push('evidence.always_present_artifacts:anchors');
+        if (!evidenceAlwaysPresent.includes('webhook_receipts'))
+            missing.push('evidence.always_present_artifacts:webhook_receipts');
+        if (missing.length > 0) {
+            throw new IncompatibleNodeError(missing);
+        }
+    }
     async approvalDecide(approvalRequestId, input) {
         const body = {
             actor_context: input.actor_context,
@@ -386,6 +416,14 @@ class ContractLaneClient {
             body.signed_payload_hash = env.payload_hash;
         }
         else if (input.signature_envelope) {
+            if (!this.disableCapabilityCheck) {
+                if (input.signature_envelope.version === 'sig-v1')
+                    await this.requireProtocolV1();
+                else if (input.signature_envelope.version === 'sig-v2')
+                    await this.requireProtocolV2ES256();
+                else if (input.signature_envelope.version === 'sig-v3')
+                    await this.requireProtocolV3WebAuthn();
+            }
             body.signature_envelope = input.signature_envelope;
         }
         else {
@@ -754,6 +792,31 @@ function parseSigV2(sig, expectedContext) {
         throw new Error('invalid signature encoding');
     return sig;
 }
+function parseSigV3(sig, expectedContext) {
+    const allowed = new Set(['version', 'algorithm', 'credential_id', 'challenge_id', 'client_data_json', 'authenticator_data', 'signature', 'payload_hash', 'issued_at', 'context', 'key_id']);
+    for (const k of Object.keys(sig))
+        if (!allowed.has(k))
+            throw new Error(`unknown signature key: ${k}`);
+    if (sig.version !== 'sig-v3')
+        throw new Error('signature_envelope version must be sig-v3');
+    if (sig.algorithm !== 'webauthn-es256')
+        throw new Error('signature_envelope algorithm must be webauthn-es256');
+    if (!/^[0-9a-f]{64}$/.test(sig.payload_hash))
+        throw new Error('payload_hash must be lowercase hex sha256');
+    parseRFC3339UTC(sig.issued_at, 'issued_at');
+    if (expectedContext && sig.context && sig.context !== expectedContext)
+        throw new Error('signature context mismatch');
+    base64URLNoPaddingToBytes(sig.credential_id, 'credential_id');
+    if (!String(sig.challenge_id ?? '').trim())
+        throw new Error('challenge_id is required');
+    const clientData = base64URLNoPaddingToBytes(sig.client_data_json, 'client_data_json');
+    const authData = base64URLNoPaddingToBytes(sig.authenticator_data, 'authenticator_data');
+    if (authData.length < 37)
+        throw new Error('invalid authenticator_data');
+    base64URLNoPaddingToBytes(sig.signature, 'signature');
+    JSON.parse(Buffer.from(clientData).toString('utf8'));
+    return sig;
+}
 function parseSignatureEnvelope(sig, expectedContext) {
     if (!sig || typeof sig !== 'object')
         throw new Error('signature_envelope must be object');
@@ -761,7 +824,9 @@ function parseSignatureEnvelope(sig, expectedContext) {
         return parseSigV1(sig, expectedContext);
     if (sig.version === 'sig-v2')
         return parseSigV2(sig, expectedContext);
-    throw new Error('signature_envelope version must be sig-v1 or sig-v2');
+    if (sig.version === 'sig-v3')
+        return parseSigV3(sig, expectedContext);
+    throw new Error('signature_envelope version must be sig-v1 or sig-v2 or sig-v3');
 }
 function normalizeAmountV1(currency, minorUnits) {
     if (!Number.isInteger(minorUnits) || minorUnits < 0)
@@ -1104,6 +1169,9 @@ function verifySignatureEnvelope(payload, sig, expectedContext) {
             throw new Error('invalid signature');
         return;
     }
+    if (parsed.version === 'sig-v3') {
+        throw new Error('sig-v3 verification requires verifySigV3 with webauthn options');
+    }
     const pub = p256PublicKeyFromSec1Uncompressed(base64URLNoPaddingToBytes(parsed.public_key, 'signature public key'));
     const sigCompat = parseES256SignatureCompat(parsed.signature);
     if (sigCompat.raw64) {
@@ -1114,7 +1182,78 @@ function verifySignatureEnvelope(payload, sig, expectedContext) {
     if (!sigCompat.der || !(0, crypto_1.verify)(null, msg, pub, sigCompat.der))
         throw new Error('invalid signature');
 }
+function verifySigV3(payload, sig, opts) {
+    const parsed = parseSigV3(sig, opts.expectedContext);
+    const expectedHash = canonicalSha256Hex(payload);
+    if (parsed.payload_hash !== expectedHash)
+        throw new Error('payload hash mismatch');
+    if (opts.expectedCredentialID && opts.expectedCredentialID !== parsed.credential_id) {
+        throw new Error('credential_id mismatch');
+    }
+    const clientDataJSON = Buffer.from(base64URLNoPaddingToBytes(parsed.client_data_json, 'client_data_json'));
+    const authenticatorData = Buffer.from(base64URLNoPaddingToBytes(parsed.authenticator_data, 'authenticator_data'));
+    const derSig = Buffer.from(base64URLNoPaddingToBytes(parsed.signature, 'signature'));
+    let clientData;
+    try {
+        clientData = JSON.parse(clientDataJSON.toString('utf8'));
+    }
+    catch {
+        throw new Error('invalid client_data_json');
+    }
+    if (String(clientData?.type ?? '').trim() !== 'webauthn.get')
+        throw new Error('invalid webauthn client data type');
+    if (opts.expectedChallengeB64URL) {
+        const got = Buffer.from(base64URLNoPaddingToBytes(String(clientData?.challenge ?? ''), 'client_data_json.challenge'));
+        const want = Buffer.from(base64URLNoPaddingToBytes(opts.expectedChallengeB64URL, 'expectedChallengeB64URL'));
+        if (got.length !== want.length || !(0, crypto_1.timingSafeEqual)(got, want))
+            throw new Error('webauthn challenge mismatch');
+    }
+    if (opts.allowedOrigins && opts.allowedOrigins.length > 0) {
+        const origin = String(clientData?.origin ?? '');
+        if (!opts.allowedOrigins.includes(origin))
+            throw new Error('webauthn origin mismatch');
+    }
+    const flags = authenticatorData[32];
+    if ((flags & 0x01) === 0)
+        throw new Error('webauthn user presence required');
+    if ((flags & 0x04) === 0)
+        throw new Error('webauthn user verification required');
+    const signCount = authenticatorData.readUInt32BE(33);
+    if ((opts.previousSignCount ?? 0) > 0 && signCount > 0 && signCount <= (opts.previousSignCount ?? 0)) {
+        throw new Error('webauthn sign_count regression');
+    }
+    if (opts.expectedRPID) {
+        const expectedRpHash = (0, crypto_1.createHash)('sha256').update(opts.expectedRPID).digest();
+        const gotRpHash = authenticatorData.subarray(0, 32);
+        if (!(0, crypto_1.timingSafeEqual)(expectedRpHash, gotRpHash))
+            throw new Error('webauthn rpIdHash mismatch');
+    }
+    const pub = p256PublicKeyFromSec1Uncompressed(opts.credentialPublicKeySec1);
+    const signedData = Buffer.concat([authenticatorData, (0, crypto_1.createHash)('sha256').update(clientDataJSON).digest()]);
+    if (!(0, crypto_1.verify)('sha256', signedData, pub, derSig))
+        throw new Error('invalid signature');
+    return { signCount, origin: String(clientData?.origin ?? '') };
+}
+function buildSigV3FromWebAuthnAssertion(input) {
+    const payloadHash = canonicalSha256Hex(input.payload);
+    return {
+        version: 'sig-v3',
+        algorithm: 'webauthn-es256',
+        credential_id: bytesToBase64URLNoPadding(input.assertion.credentialId),
+        challenge_id: String(input.challengeId || '').trim(),
+        client_data_json: bytesToBase64URLNoPadding(input.assertion.clientDataJSON),
+        authenticator_data: bytesToBase64URLNoPadding(input.assertion.authenticatorData),
+        signature: bytesToBase64URLNoPadding(input.assertion.signatureDER),
+        payload_hash: payloadHash,
+        issued_at: input.issuedAt.toISOString(),
+        context: input.context ?? 'contract-action',
+        ...(input.keyId ? { key_id: input.keyId } : {}),
+    };
+}
 function agentIdFromSignatureEnvelope(sig) {
+    if (sig.version === 'sig-v3') {
+        throw new Error('sig-v3 agent binding requires credential lookup');
+    }
     if (sig.algorithm === 'ed25519') {
         return agentIdFromPublicKey(Buffer.from(sig.public_key, 'base64'));
     }

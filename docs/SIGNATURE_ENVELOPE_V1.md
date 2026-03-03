@@ -64,4 +64,4 @@ Verification must fail closed:
 
 ## Backwards Compatibility
 
-`sig-v1` remains unchanged for existing clients. P-256 is introduced additively via `sig-v2` (`docs/SIG_V2.md`).
+`sig-v1` remains unchanged for existing clients. P-256 is introduced additively via `sig-v2` (`docs/SIG_V2.md`) and WebAuthn approvals via `sig-v3` (`docs/SIG_V3.md`).

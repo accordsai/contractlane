@@ -22,4 +22,18 @@ type EnvelopeV2 struct {
 	Context     string `json:"context,omitempty"`
 }
 
+type EnvelopeV3 struct {
+	Version           string `json:"version"`
+	Algorithm         string `json:"algorithm"`
+	CredentialID      string `json:"credential_id"`
+	ChallengeID       string `json:"challenge_id"`
+	ClientDataJSON    string `json:"client_data_json"`
+	AuthenticatorData string `json:"authenticator_data"`
+	Signature         string `json:"signature"`
+	PayloadHash       string `json:"payload_hash"`
+	IssuedAt          string `json:"issued_at"`
+	KeyID             string `json:"key_id,omitempty"`
+	Context           string `json:"context,omitempty"`
+}
+
 type Envelope = EnvelopeV2

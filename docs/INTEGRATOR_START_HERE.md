@@ -32,14 +32,14 @@ If you are pinning versions in production, use the exact released version for ea
 3. `docs/HOSTED_AGENT_JOURNEY.md` (hosted end-to-end flow)
 4. `docs/TEMPLATE_MODEL.md` (template scope: deployment/principal/actor/contract)
 5. `docs/RULES_V1.md` (per-contract validation requirements)
-6. `docs/SIG_V1.md` and `docs/AGENT_ID_V1.md`
+6. `docs/SIG_V1.md`, `docs/SIG_V2.md`, `docs/SIG_V3.md`, and `docs/AGENT_ID_V1.md`
 7. `docs/EVIDENCE_V1.md` and `docs/PROOF_BUNDLE_V1.md`
 8. `docs/CONFORMANCE.md`
 
 ## Non-Negotiable v1 Rules
 
 - Canonical JSON hashing must match protocol definitions exactly.
-- `sig-v1` signs decoded payload-hash bytes, not raw payload JSON bytes.
+- `sig-v1`/`sig-v2` sign decoded payload-hash bytes, not raw payload JSON bytes.
 - `evidence-v1` hash semantics are fixed.
 - `proof-bundle-v1` ID is computed over `proof` object only:
   - `proof_id = sha256_hex(canonical_json(proof))`
@@ -109,8 +109,8 @@ Run:
 ## OpenClaw Listing Blurb
 
 Contract Lane is a deterministic contract-governance and proof protocol for agents.
-It exposes verifiable `evidence-v1` and `proof-bundle-v1` artifacts, uses `sig-v1`
-for signed actions, and supports offline verification.
+It exposes verifiable `evidence-v1` and `proof-bundle-v1` artifacts, uses signature
+envelopes (`sig-v1`, additive `sig-v2`, additive `sig-v3`), and supports offline verification.
 
 Compatibility identifiers:
 

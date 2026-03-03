@@ -1,5 +1,6 @@
 import json
 import base64
+import hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -7,13 +8,14 @@ import httpx
 import pytest
 
 try:
-    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives import serialization, hashes
     from cryptography.hazmat.primitives.asymmetric import ec
 
     HAS_CRYPTOGRAPHY = True
 except Exception:
     serialization = None
     ec = None
+    hashes = None
     HAS_CRYPTOGRAPHY = False
 
 from contractlane.client import (
@@ -44,9 +46,11 @@ from contractlane.client import (
     canonical_sha256_hex,
     parse_sig_v1,
     parse_sig_v2,
+    parse_sig_v3,
     parse_delegation_revocation_v1,
     parse_proof_bundle_v1,
     compute_proof_id,
+    verify_sig_v3,
     verify_proof_bundle_v1,
     VerifyFailureCode,
 )
@@ -599,6 +603,49 @@ def test_parse_sig_v2_rejects_malformed_point():
     bad["public_key"] = base64.urlsafe_b64encode(off_curve).decode("ascii").rstrip("=")
     with pytest.raises(ValueError):
         parse_sig_v2(bad)
+
+
+@pytest.mark.skipif(not HAS_CRYPTOGRAPHY, reason="cryptography backend not installed")
+def test_parse_sig_v3_and_verify_happy_path():
+    key = ec.generate_private_key(ec.SECP256R1())
+    payload = {"contract_id": "ctr_1", "approval_request_id": "aprq_1"}
+    payload_hash = _canonical_sha256_hex(payload)
+    challenge_b64 = base64.urlsafe_b64encode(b"challenge_v3").decode("ascii").rstrip("=")
+    client_data_obj = {"type": "webauthn.get", "challenge": challenge_b64, "origin": "https://app.example.com"}
+    client_data_json = json.dumps(client_data_obj, separators=(",", ":")).encode("utf-8")
+    auth_data = hashlib.sha256(b"app.example.com").digest() + bytes([0x05]) + (7).to_bytes(4, "big")
+    signed_data = auth_data + hashlib.sha256(client_data_json).digest()
+    sig_der = key.sign(signed_data, ec.ECDSA(hashes.SHA256()))
+    pub = key.public_key().public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.UncompressedPoint,
+    )
+    sig = {
+        "version": "sig-v3",
+        "algorithm": "webauthn-es256",
+        "credential_id": base64.urlsafe_b64encode(b"cred_1").decode("ascii").rstrip("="),
+        "challenge_id": "wch_1",
+        "client_data_json": base64.urlsafe_b64encode(client_data_json).decode("ascii").rstrip("="),
+        "authenticator_data": base64.urlsafe_b64encode(auth_data).decode("ascii").rstrip("="),
+        "signature": base64.urlsafe_b64encode(sig_der).decode("ascii").rstrip("="),
+        "payload_hash": payload_hash,
+        "issued_at": "2026-02-20T00:00:00Z",
+        "context": "contract-action",
+    }
+    parse_sig_v3(sig, "contract-action")
+    verify_sig_v3(
+        payload,
+        sig,
+        {
+            "expected_context": "contract-action",
+            "expected_challenge_b64url": challenge_b64,
+            "allowed_origins": ["https://app.example.com"],
+            "expected_rp_id": "app.example.com",
+            "expected_credential_id": sig["credential_id"],
+            "credential_public_key_sec1": base64.urlsafe_b64encode(pub).decode("ascii").rstrip("="),
+            "previous_sign_count": 1,
+        },
+    )
 
 
 def _fixed_delegation() -> dict:

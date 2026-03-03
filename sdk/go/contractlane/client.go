@@ -228,12 +228,13 @@ type ActorContext struct {
 }
 
 type ApprovalDecideOptions struct {
-	ActorContext      ActorContext
-	Decision          string
-	SignedPayload     map[string]any
-	SignedPayloadHash string
-	Signature         map[string]any
-	SignatureEnvelope *SignatureEnvelope
+	ActorContext         ActorContext
+	Decision             string
+	SignedPayload        map[string]any
+	SignedPayloadHash    string
+	Signature            map[string]any
+	SignatureEnvelope    *SignatureEnvelope
+	SignatureEnvelopeAny map[string]any
 }
 
 type ApprovalDecisionResult struct {
@@ -255,6 +256,20 @@ type SignatureEnvelopeV1 struct {
 
 type SignatureEnvelopeV2 = SignatureEnvelopeV1
 type SignatureEnvelope = SignatureEnvelopeV1
+
+type SignatureEnvelopeV3 struct {
+	Version           string `json:"version"`
+	Algorithm         string `json:"algorithm"`
+	CredentialID      string `json:"credential_id"`
+	ChallengeID       string `json:"challenge_id"`
+	ClientDataJSON    string `json:"client_data_json"`
+	AuthenticatorData string `json:"authenticator_data"`
+	Signature         string `json:"signature"`
+	PayloadHash       string `json:"payload_hash"`
+	IssuedAt          string `json:"issued_at"`
+	KeyID             string `json:"key_id,omitempty"`
+	Context           string `json:"context,omitempty"`
+}
 
 type Capabilities struct {
 	Protocol struct {
@@ -522,6 +537,39 @@ func (c *Client) RequireProtocolV2ES256(ctx context.Context) error {
 	}
 	if !containsString(caps.Signatures.Algorithms, "es256") {
 		missing = append(missing, "signatures.algorithms contains es256")
+	}
+	if !containsString(caps.Evidence.AlwaysPresentArtifacts, "anchors") {
+		missing = append(missing, "evidence.always_present_artifacts contains anchors")
+	}
+	if !containsString(caps.Evidence.AlwaysPresentArtifacts, "webhook_receipts") {
+		missing = append(missing, "evidence.always_present_artifacts contains webhook_receipts")
+	}
+	if len(missing) > 0 {
+		return &IncompatibleNodeError{Missing: missing}
+	}
+	return nil
+}
+
+func (c *Client) RequireProtocolV3WebAuthn(ctx context.Context) error {
+	caps, err := c.FetchCapabilities(ctx)
+	if err != nil {
+		return err
+	}
+	missing := make([]string, 0, 7)
+	if caps.Protocol.Name != "contractlane" {
+		missing = append(missing, "protocol.name=contractlane")
+	}
+	if !containsString(caps.Protocol.Versions, "v1") {
+		missing = append(missing, "protocol.versions contains v1")
+	}
+	if !containsString(caps.Evidence.BundleVersions, "evidence-v1") {
+		missing = append(missing, "evidence.bundle_versions contains evidence-v1")
+	}
+	if !containsString(caps.Signatures.Envelopes, "sig-v3") {
+		missing = append(missing, "signatures.envelopes contains sig-v3")
+	}
+	if !containsString(caps.Signatures.Algorithms, "webauthn-es256") {
+		missing = append(missing, "signatures.algorithms contains webauthn-es256")
 	}
 	if !containsString(caps.Evidence.AlwaysPresentArtifacts, "anchors") {
 		missing = append(missing, "evidence.always_present_artifacts contains anchors")
@@ -819,9 +867,15 @@ func (c *Client) ApprovalDecide(ctx context.Context, approvalRequestID string, o
 		body["signed_payload_hash"] = opts.SignedPayloadHash
 	}
 
-	env := opts.SignatureEnvelope
+	var envAny map[string]any
 	defaultEnvVersion := ""
-	if env == nil {
+	if len(opts.SignatureEnvelopeAny) > 0 {
+		envAny = opts.SignatureEnvelopeAny
+	} else if opts.SignatureEnvelope != nil {
+		b, _ := json.Marshal(opts.SignatureEnvelope)
+		_ = json.Unmarshal(b, &envAny)
+	}
+	if envAny == nil {
 		if len(c.signingKey) == ed25519.PrivateKeySize {
 			signed, err := SignSigV1Ed25519(opts.SignedPayload, c.signingKey, c.now().UTC(), c.signingContext)
 			if err != nil {
@@ -830,7 +884,8 @@ func (c *Client) ApprovalDecide(ctx context.Context, approvalRequestID string, o
 			if strings.TrimSpace(c.signingKeyID) != "" {
 				signed.KeyID = c.signingKeyID
 			}
-			env = &signed
+			b, _ := json.Marshal(signed)
+			_ = json.Unmarshal(b, &envAny)
 			defaultEnvVersion = "sig-v1"
 		} else if c.signingKeyP256 != nil {
 			signed, err := SignSigV2ES256(opts.SignedPayload, c.signingKeyP256, c.now().UTC(), c.signingContext)
@@ -840,13 +895,15 @@ func (c *Client) ApprovalDecide(ctx context.Context, approvalRequestID string, o
 			if strings.TrimSpace(c.signingKeyID) != "" {
 				signed.KeyID = c.signingKeyID
 			}
-			env = &signed
+			b, _ := json.Marshal(signed)
+			_ = json.Unmarshal(b, &envAny)
 			defaultEnvVersion = "sig-v2"
 		}
 	}
-	if env != nil {
+	if envAny != nil {
+		envVersion := strings.TrimSpace(fmt.Sprint(envAny["version"]))
 		if !c.disableCapabilityCheck {
-			switch strings.TrimSpace(env.Version) {
+			switch envVersion {
 			case "sig-v1":
 				if err := c.RequireProtocolV1(ctx); err != nil {
 					return nil, err
@@ -855,9 +912,17 @@ func (c *Client) ApprovalDecide(ctx context.Context, approvalRequestID string, o
 				if err := c.RequireProtocolV2ES256(ctx); err != nil {
 					return nil, err
 				}
+			case "sig-v3":
+				if err := c.RequireProtocolV3WebAuthn(ctx); err != nil {
+					return nil, err
+				}
 			default:
 				if defaultEnvVersion == "sig-v2" {
 					if err := c.RequireProtocolV2ES256(ctx); err != nil {
+						return nil, err
+					}
+				} else if defaultEnvVersion == "sig-v3" {
+					if err := c.RequireProtocolV3WebAuthn(ctx); err != nil {
 						return nil, err
 					}
 				} else {
@@ -867,7 +932,7 @@ func (c *Client) ApprovalDecide(ctx context.Context, approvalRequestID string, o
 				}
 			}
 		}
-		body["signature_envelope"] = env
+		body["signature_envelope"] = envAny
 	} else {
 		legacy := opts.Signature
 		if legacy == nil {

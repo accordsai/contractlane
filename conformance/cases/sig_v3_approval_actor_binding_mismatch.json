@@ -1,0 +1,4 @@
+{
+  "name": "sig_v3_approval_actor_binding_mismatch",
+  "description": "sig-v3 assertion fails when actor binding does not match challenge/credential owner."
+}

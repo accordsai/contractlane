@@ -7,9 +7,12 @@
 - GET  /ial/actors?principal_id=&type=
 - POST /ial/invites
 - GET  /ial/invites/{invite_id}
-- POST /ial/webauthn/register/start (stub)
+- POST /ial/webauthn/register/start (legacy stub)
 - POST /ial/webauthn/register/finish (dev stub: invite_token "dev:<invite_id>")
-- POST /ial/verify-signature (stub)
+- POST /ial/webauthn/credentials/register/start
+- POST /ial/webauthn/credentials/register/finish
+- POST /ial/webauthn/assertions/start
+- POST /ial/verify-signature
 - PUT  /ial/actors/{actor_id}/policy-profile
 - GET  /ial/actors/{actor_id}/policy-profile
 
@@ -69,11 +72,13 @@
 
 `POST /cel/approvals/{approval_request_id}:decide` accepts the existing fields and additionally supports:
 
-- `signature_envelope` (optional): `sig-v1` or `sig-v2` envelope object.
+- `signature_envelope` (optional): `sig-v1`, `sig-v2`, or `sig-v3` envelope object.
 
 If `signature_envelope.context` is present, it must equal `"contract-action"`.
 
 Legacy request shape remains supported.
+
+`sig-v3` verification is delegated to IAL WebAuthn verification.
 
 ## Evidence Artifacts
 
@@ -118,8 +123,13 @@ Routing is configured via `webhook_endpoints` records scoped by `(provider, endp
 
 Signature capabilities are advertised in:
 
-- `signatures.envelopes` (for example `["sig-v1","sig-v2"]`)
-- `signatures.algorithms` (for example `["ed25519","es256"]`)
+- `signatures.envelopes` (for example `["sig-v1","sig-v2","sig-v3"]`)
+- `signatures.algorithms` (for example `["ed25519","es256","webauthn-es256"]`)
+
+When enabled, capability discovery also includes:
+
+- `webauthn.approval_sig_v3 = true`
+- `webauthn.uv_required = true`
 
 Onboarding/public-signup routes are control-plane endpoints and may be operator-specific; they are not currently required protocol discovery fields in the CEL well-known response.
 

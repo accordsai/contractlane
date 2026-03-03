@@ -1,0 +1,4 @@
+{
+  "name": "well_known_protocol_capabilities_sig_v3",
+  "description": "Well-known capabilities advertise sig-v3/webauthn-es256 support when enabled."
+}

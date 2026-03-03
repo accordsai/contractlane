@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BASE_URL="${BASE_URL:-${CL_BASE_URL:-http://localhost:8080}}"
 IAL_BASE_URL="${IAL_BASE_URL:-${CL_IAL_BASE_URL:-http://localhost:8081}}"
+SIGV3_ORIGIN="${SIGV3_ORIGIN:-http://localhost:3000}"
+SIGV3_RPID="${SIGV3_RPID:-localhost}"
 OFFLINE_FIXTURE_DIR="$ROOT/conformance/fixtures/agent-commerce-offline"
 OFFLINE_EVIDENCE_PATH="$OFFLINE_FIXTURE_DIR/evidence.json"
 OFFLINE_PROOF_PATH="$OFFLINE_FIXTURE_DIR/settlement_proof.json"
@@ -42,6 +44,10 @@ required_cases=(
   sig_v1_approval_happy_path.json
   sig_v2_approval_happy_path.json
   sig_v2_approval_bad_signature.json
+  sig_v3_approval_happy_path.json
+  sig_v3_approval_replay_rejected.json
+  sig_v3_approval_origin_mismatch.json
+  sig_v3_approval_actor_binding_mismatch.json
   hosted_commerce_intent_roundtrip.json
   hosted_commerce_accept_roundtrip.json
   hosted_authorization_missing_delegation_intent.json
@@ -61,6 +67,7 @@ required_cases=(
   delegation_v1_p256_sign_verify.json
   mixed_signers_ed25519_p256_verify.json
   sig_v2_invalid_encoding_rejects.json
+  well_known_protocol_capabilities_sig_v3.json
   evp_verify_bundle_good.json
 )
 
@@ -294,6 +301,15 @@ run_well_known_capabilities_deterministic_case() {
   [[ "$can1" == "$can2" ]]
 }
 
+run_well_known_capabilities_sig_v3_case() {
+  local cap
+  cap="$(curl_json GET "$BASE_URL/cel/.well-known/contractlane")"
+  echo "$cap" | jq -e '.signatures.envelopes | index("sig-v3") != null' >/dev/null
+  echo "$cap" | jq -e '.signatures.algorithms | index("webauthn-es256") != null' >/dev/null
+  echo "$cap" | jq -e '.webauthn.approval_sig_v3 == true' >/dev/null
+  echo "$cap" | jq -e '.webauthn.uv_required == true' >/dev/null
+}
+
 run_agent_id_offline_case() {
   local fixture expected got
   fixture="$ROOT/conformance/cases/agent_id_v1_roundtrip.json"
@@ -497,6 +513,143 @@ run_sigv2_bad_signature_case() {
 
   [[ "$status" == "403" ]]
   echo "$body" | jq -e '.error.code=="BAD_SIGNATURE"' >/dev/null
+}
+
+register_sigv3_credential() {
+  local human_auth start_resp reg_id challenge cred_json credential_id public_key client_data finish_req finish_resp
+  human_auth="Authorization: Bearer $HUMAN_TOKEN"
+  start_resp="$(curl_json POST "$IAL_BASE_URL/ial/webauthn/credentials/register/start" "{}" "$human_auth")"
+  reg_id="$(echo "$start_resp" | jq -er '.registration_id')"
+  challenge="$(echo "$start_resp" | jq -er '.webauthn.publicKey.challenge')"
+
+  cred_json="$(go run "$ROOT/conformance/runner/helpers/sigv3/main.go" credential)"
+  credential_id="$(echo "$cred_json" | jq -er '.credential_id')"
+  public_key="$(echo "$cred_json" | jq -er '.public_key')"
+  client_data="$(go run "$ROOT/conformance/runner/helpers/sigv3/main.go" client-data-create "$challenge" "$SIGV3_ORIGIN")"
+
+  finish_req="$(jq -cn --arg reg "$reg_id" --arg cid "$credential_id" --arg pub "$public_key" --arg cjson "$client_data" '{registration_id:$reg,credential_id:$cid,public_key:$pub,client_data_json:$cjson,transports:["internal"]}')"
+  finish_resp="$(curl_json POST "$IAL_BASE_URL/ial/webauthn/credentials/register/finish" "$finish_req" "$human_auth")"
+  [[ "$(echo "$finish_resp" | jq -er '.status')" == "REGISTERED" ]]
+  CONFORMANCE_SIGV3_CREDENTIAL_ID="$credential_id"
+  export CONFORMANCE_SIGV3_CREDENTIAL_ID
+}
+
+create_additional_human_session() {
+  local email invite_resp invite_id enroll_resp actor_id ml_start ml_url ml_token ml_finish token
+  email="conformance+sigv3+$(date +%s)+$RANDOM@example.com"
+  invite_resp="$(curl_json POST "$IAL_BASE_URL/ial/invites" "$(jq -cn --arg principal "$PRINCIPAL_ID" --arg email "$email" '{principal_id:$principal,invitee:{email:$email},requested_roles:["LEGAL"],expires_in_hours:72}')")"
+  invite_id="$(echo "$invite_resp" | jq -er '.invite.invite_id')"
+  enroll_resp="$(curl_json POST "$IAL_BASE_URL/ial/webauthn/register/finish" "$(jq -cn --arg token "dev:$invite_id" '{invite_token:$token,attestation_response:{}}')")"
+  actor_id="$(echo "$enroll_resp" | jq -er '.actor.actor_id')"
+  ml_start="$(curl_json POST "$IAL_BASE_URL/ial/auth/magic-link/start" "$(jq -cn --arg principal "$PRINCIPAL_ID" --arg email "$email" '{principal_id:$principal,email:$email,redirect_url:"https://example.local/return"}')")"
+  ml_url="$(echo "$ml_start" | jq -er '.magic_link_url')"
+  ml_token="$(echo "$ml_url" | sed -E 's/.*token=([^&]+).*/\1/')"
+  ml_finish="$(curl_json POST "$IAL_BASE_URL/ial/auth/magic-link/finish" "$(jq -cn --arg token "$ml_token" '{token:$token}')")"
+  token="$(echo "$ml_finish" | jq -er '.credentials.token')"
+  printf '%s\n%s\n' "$actor_id" "$token"
+}
+
+run_sigv3_approval_case() {
+  local mode
+  mode="$1"
+  local agent_auth human_auth contract_create contract_id route_resp aprq signed_payload payload_hash start_assert challenge_id challenge_b64 envelope decide_req decide_resp decide_status
+  agent_auth="Authorization: Bearer $AGENT_TOKEN"
+  human_auth="Authorization: Bearer $HUMAN_TOKEN"
+
+  register_sigv3_credential
+  curl_json POST "$BASE_URL/cel/dev/seed-template" "$(jq -cn --arg principal "$PRINCIPAL_ID" '{principal_id:$principal}')" "$agent_auth" >/dev/null
+  contract_create="$(curl_json POST "$BASE_URL/cel/contracts" "$(jq -cn --arg principal "$PRINCIPAL_ID" --arg actor "$AGENT_ACTOR_ID" --arg idem "conf-create-sigv3-$(date +%s)-$RANDOM" '{actor_context:{principal_id:$principal,actor_id:$actor,actor_type:"AGENT",idempotency_key:$idem},template_id:"tpl_nda_us_v1",counterparty:{name:"Conformance Co",email:"counterparty@example.com"},initial_variables:{}}')" "$agent_auth")"
+  contract_id="$(echo "$contract_create" | jq -er '.contract.contract_id')"
+  route_resp="$(curl_json POST "$BASE_URL/cel/contracts/$contract_id/approvals:route" "$(jq -cn --arg principal "$PRINCIPAL_ID" --arg actor "$AGENT_ACTOR_ID" '{actor_context:{principal_id:$principal,actor_id:$actor,actor_type:"AGENT"},action:"SEND_FOR_SIGNATURE",required_roles:["LEGAL"]}')" "$agent_auth")"
+  aprq="$(echo "$route_resp" | jq -er '.approval_request.approval_request_id')"
+
+  signed_payload="$(jq -cn --arg cid "$contract_id" --arg aprq "$aprq" --arg nonce "conf-nonce-sigv3-$RANDOM" '{contract_id:$cid,approval_request_id:$aprq,packet_hash:"sha256:dev",diff_hash:"sha256:dev",risk_hash:"sha256:dev",nonce:$nonce}')"
+  payload_hash="$(go run "$ROOT/conformance/runner/helpers/sigv3/main.go" hash "$signed_payload")"
+  start_assert="$(curl_json POST "$IAL_BASE_URL/ial/webauthn/assertions/start" "$(jq -cn --arg aprq "$aprq" --arg h "$payload_hash" '{approval_request_id:$aprq,payload_hash:$h,context:"contract-action"}')" "$human_auth")"
+  challenge_id="$(echo "$start_assert" | jq -er '.challenge_id')"
+  challenge_b64="$(echo "$start_assert" | jq -er '.webauthn.publicKey.challenge')"
+
+  case "$mode" in
+    happy|replay|actor_mismatch)
+      envelope="$(go run "$ROOT/conformance/runner/helpers/sigv3/main.go" sign "$signed_payload" "$challenge_id" "$challenge_b64" "$SIGV3_ORIGIN" "$SIGV3_RPID" "contract-action")"
+      ;;
+    origin_mismatch)
+      envelope="$(go run "$ROOT/conformance/runner/helpers/sigv3/main.go" sign "$signed_payload" "$challenge_id" "$challenge_b64" "https://evil.example" "$SIGV3_RPID" "contract-action")"
+      ;;
+    *)
+      echo "unknown sigv3 mode: $mode" >&2
+      return 1
+      ;;
+  esac
+
+  decide_req="$(jq -cn --arg principal "$PRINCIPAL_ID" --arg actor "$HUMAN_ACTOR_ID" --argjson payload "$signed_payload" --argjson env "$envelope" '{actor_context:{principal_id:$principal,actor_id:$actor,actor_type:"HUMAN",idempotency_key:"conf-decide-sigv3-1"},decision:"APPROVE",signed_payload:$payload,signed_payload_hash:$env.payload_hash,signature_envelope:$env}')"
+
+  if [[ "$mode" == "happy" ]]; then
+    decide_resp="$(curl_json POST "$BASE_URL/cel/approvals/$aprq:decide" "$decide_req" "$human_auth")"
+    decide_status="$(echo "$decide_resp" | jq -er '.status')"
+    [[ "$decide_status" == "APPROVED" ]]
+    return 0
+  fi
+
+  if [[ "$mode" == "origin_mismatch" ]]; then
+    local tmp_bad status_bad body_bad
+    tmp_bad="$(mktemp)"
+    status_bad="$(curl -sS -o "$tmp_bad" -w '%{http_code}' -X POST "$BASE_URL/cel/approvals/$aprq:decide" -H 'content-type: application/json' -H "$human_auth" -d "$decide_req")"
+    body_bad="$(cat "$tmp_bad")"
+    rm -f "$tmp_bad"
+    [[ "$status_bad" == "403" ]]
+    echo "$body_bad" | jq -e '.error.code=="BAD_SIGNATURE"' >/dev/null
+    return 0
+  fi
+
+  if [[ "$mode" == "actor_mismatch" ]]; then
+    local other_actor other_token mismatch_req tmp3 status3 body3 pair
+    pair="$(create_additional_human_session)"
+    other_actor="$(echo "$pair" | sed -n '1p')"
+    other_token="$(echo "$pair" | sed -n '2p')"
+    mismatch_req="$(echo "$decide_req" | jq --arg actor "$other_actor" '.actor_context.actor_id=$actor | .actor_context.idempotency_key="conf-decide-sigv3-actor-mismatch"')"
+    tmp3="$(mktemp)"
+    status3="$(curl -sS -o "$tmp3" -w '%{http_code}' -X POST "$BASE_URL/cel/approvals/$aprq:decide" -H 'content-type: application/json' -H "Authorization: Bearer $other_token" -d "$mismatch_req")"
+    body3="$(cat "$tmp3")"
+    rm -f "$tmp3"
+    [[ "$status3" == "403" ]]
+    echo "$body3" | jq -e '.error.code=="BAD_SIGNATURE"' >/dev/null
+    return 0
+  fi
+
+  if [[ "$mode" == "replay" ]]; then
+    local contract_create2 contract_id2 route_resp2 aprq2 tmp status body
+    decide_resp="$(curl_json POST "$BASE_URL/cel/approvals/$aprq:decide" "$decide_req" "$human_auth")"
+    decide_status="$(echo "$decide_resp" | jq -er '.status')"
+    [[ "$decide_status" == "APPROVED" ]]
+    contract_create2="$(curl_json POST "$BASE_URL/cel/contracts" "$(jq -cn --arg principal "$PRINCIPAL_ID" --arg actor "$AGENT_ACTOR_ID" --arg idem "conf-create-sigv3-replay-$(date +%s)-$RANDOM" '{actor_context:{principal_id:$principal,actor_id:$actor,actor_type:"AGENT",idempotency_key:$idem},template_id:"tpl_nda_us_v1",counterparty:{name:"Conformance Co",email:"counterparty@example.com"},initial_variables:{}}')" "$agent_auth")"
+    contract_id2="$(echo "$contract_create2" | jq -er '.contract.contract_id')"
+    route_resp2="$(curl_json POST "$BASE_URL/cel/contracts/$contract_id2/approvals:route" "$(jq -cn --arg principal "$PRINCIPAL_ID" --arg actor "$AGENT_ACTOR_ID" '{actor_context:{principal_id:$principal,actor_id:$actor,actor_type:"AGENT"},action:"SEND_FOR_SIGNATURE",required_roles:["LEGAL"]}')" "$agent_auth")"
+    aprq2="$(echo "$route_resp2" | jq -er '.approval_request.approval_request_id')"
+    tmp="$(mktemp)"
+    status="$(curl -sS -o "$tmp" -w '%{http_code}' -X POST "$BASE_URL/cel/approvals/$aprq2:decide" -H 'content-type: application/json' -H "$human_auth" -d "$decide_req")"
+    body="$(cat "$tmp")"
+    rm -f "$tmp"
+    [[ "$status" == "403" ]]
+    echo "$body" | jq -e '.error.code=="BAD_SIGNATURE"' >/dev/null
+    return 0
+  fi
+}
+
+run_sigv3_case() {
+  run_sigv3_approval_case "happy"
+}
+
+run_sigv3_replay_case() {
+  run_sigv3_approval_case "replay"
+}
+
+run_sigv3_origin_mismatch_case() {
+  run_sigv3_approval_case "origin_mismatch"
+}
+
+run_sigv3_actor_binding_mismatch_case() {
+  run_sigv3_approval_case "actor_mismatch"
 }
 
 run_evidence_artifact_case() {
@@ -788,6 +941,7 @@ run_case "settlement_delegation_root_issued_trust_pass.json" run_settlement_dele
 run_case "well_known_protocol_capabilities.json" run_well_known_capabilities_case || true
 run_case "well_known_protocol_capabilities_hosted_commerce_and_proof.json" run_well_known_capabilities_hosted_commerce_and_proof_case || true
 run_case "well_known_protocol_capabilities_deterministic.json" run_well_known_capabilities_deterministic_case || true
+run_case "well_known_protocol_capabilities_sig_v3.json" run_well_known_capabilities_sig_v3_case || true
 
 if [[ "$RUN_STATUS" == "PASS" ]]; then
   if ! resolve_dev_identity; then
@@ -832,6 +986,10 @@ if [[ "$RUN_STATUS" == "PASS" ]]; then
 fi
 run_case "sig_v2_approval_happy_path.json" run_sigv2_case || true
 run_case "sig_v2_approval_bad_signature.json" run_sigv2_bad_signature_case || true
+run_case "sig_v3_approval_happy_path.json" run_sigv3_case || true
+run_case "sig_v3_approval_replay_rejected.json" run_sigv3_replay_case || true
+run_case "sig_v3_approval_origin_mismatch.json" run_sigv3_origin_mismatch_case || true
+run_case "sig_v3_approval_actor_binding_mismatch.json" run_sigv3_actor_binding_mismatch_case || true
 run_case "hosted_commerce_intent_roundtrip.json" run_hosted_commerce_intent_roundtrip_case || true
 run_case "hosted_commerce_accept_roundtrip.json" run_hosted_commerce_accept_roundtrip_case || true
 run_case "hosted_authorization_missing_delegation_intent.json" run_hosted_authorization_missing_delegation_intent_case || true

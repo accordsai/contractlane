@@ -18,6 +18,7 @@ type hostedModeConfig struct {
 	EnableProofExport                         bool
 	EnableProofBundleExport                   bool
 	EnableTemplateAdminAPI                    bool
+	EnableSigV3WebAuthn                       bool
 	EnableServerDerivedSettlementAttestations bool
 	TemplateAdminBootstrapToken               string
 	TemplateAdminAuthMode                     string
@@ -41,6 +42,7 @@ func loadHostedModeConfig() hostedModeConfig {
 		EnableProofExport:                         envBoolDefault("ENABLE_PROOF_EXPORT", true),
 		EnableProofBundleExport:                   envBoolDefault("ENABLE_PROOF_BUNDLE_EXPORT", true),
 		EnableTemplateAdminAPI:                    envBoolDefault("ENABLE_TEMPLATE_ADMIN_API", false),
+		EnableSigV3WebAuthn:                       envBoolDefault("ENABLE_SIG_V3_WEBAUTHN", true),
 		EnableServerDerivedSettlementAttestations: envBoolDefault("ENABLE_SERVER_DERIVED_SETTLEMENT_ATTESTATIONS", false),
 		TemplateAdminBootstrapToken:               strings.TrimSpace(os.Getenv("TEMPLATE_ADMIN_BOOTSTRAP_TOKEN")),
 		TemplateAdminAuthMode:                     adminMode,
@@ -249,6 +251,11 @@ type signaturesInfo struct {
 	Algorithms []string `json:"algorithms"`
 }
 
+type webAuthnCapabilityInfo struct {
+	ApprovalSigV3 bool `json:"approval_sig_v3"`
+	UVRequired    bool `json:"uv_required"`
+}
+
 type featuresInfo struct {
 	Webhooks       bool `json:"webhooks"`
 	Anchors        bool `json:"anchors"`
@@ -287,13 +294,14 @@ type proofExportInfo struct {
 }
 
 type capabilitiesResponse struct {
-	Protocol      protocolInfo      `json:"protocol"`
-	Evidence      evidenceInfo      `json:"evidence"`
-	Signatures    signaturesInfo    `json:"signatures"`
-	Features      featuresInfo      `json:"features"`
-	Commerce      commerceInfo      `json:"commerce"`
-	Authorization authorizationInfo `json:"authorization"`
-	ProofExport   proofExportInfo   `json:"proof_export"`
+	Protocol      protocolInfo           `json:"protocol"`
+	Evidence      evidenceInfo           `json:"evidence"`
+	Signatures    signaturesInfo         `json:"signatures"`
+	WebAuthn      webAuthnCapabilityInfo `json:"webauthn"`
+	Features      featuresInfo           `json:"features"`
+	Commerce      commerceInfo           `json:"commerce"`
+	Authorization authorizationInfo      `json:"authorization"`
+	ProofExport   proofExportInfo        `json:"proof_export"`
 }
 
 func buildCapabilitiesResponse(cfg hostedModeConfig) capabilitiesResponse {
@@ -309,6 +317,13 @@ func buildCapabilitiesResponse(cfg hostedModeConfig) capabilitiesResponse {
 		proofEndpoint = ""
 		formats = []string{}
 	}
+	signatureEnvelopes := []string{"sig-v1", "sig-v2"}
+	signatureAlgorithms := []string{"ed25519", "es256"}
+	if cfg.EnableSigV3WebAuthn {
+		signatureEnvelopes = append(signatureEnvelopes, "sig-v3")
+		signatureAlgorithms = append(signatureAlgorithms, "webauthn-es256")
+	}
+
 	return capabilitiesResponse{
 		Protocol: protocolInfo{
 			Name:     "contractlane",
@@ -319,8 +334,12 @@ func buildCapabilitiesResponse(cfg hostedModeConfig) capabilitiesResponse {
 			AlwaysPresentArtifacts: []string{"anchors", "webhook_receipts"},
 		},
 		Signatures: signaturesInfo{
-			Envelopes:  []string{"sig-v1", "sig-v2"},
-			Algorithms: []string{"ed25519", "es256"},
+			Envelopes:  signatureEnvelopes,
+			Algorithms: signatureAlgorithms,
+		},
+		WebAuthn: webAuthnCapabilityInfo{
+			ApprovalSigV3: cfg.EnableSigV3WebAuthn,
+			UVRequired:    cfg.EnableSigV3WebAuthn,
 		},
 		Features: featuresInfo{
 			Webhooks:       true,

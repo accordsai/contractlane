@@ -585,3 +585,194 @@ WHERE token_hash=$1 AND revoked_at IS NULL
 `, tokenHash).Scan(&sessionID, &principalID, &actorID, &expiresAt)
 	return
 }
+
+type WebAuthnCredential struct {
+	CredentialID string
+	PrincipalID  string
+	ActorID      string
+	PublicKey    []byte
+	SignCount    int64
+	RPID         string
+	Transports   []string
+	CreatedAt    time.Time
+	LastUsedAt   *time.Time
+	RevokedAt    *time.Time
+}
+
+type WebAuthnChallenge struct {
+	ChallengeID       string
+	ChallengeType     string
+	PrincipalID       string
+	ActorID           string
+	ApprovalRequestID *string
+	PayloadHash       *string
+	Context           string
+	ChallengeBytes    []byte
+	ExpiresAt         time.Time
+	UsedAt            *time.Time
+	CreatedAt         time.Time
+}
+
+var (
+	ErrWebAuthnChallengeExpired  = errors.New("WEBAUTHN_CHALLENGE_EXPIRED")
+	ErrWebAuthnChallengeUsed     = errors.New("WEBAUTHN_CHALLENGE_USED")
+	ErrWebAuthnChallengeMismatch = errors.New("WEBAUTHN_CHALLENGE_MISMATCH")
+)
+
+func (s *Store) UpsertWebAuthnCredential(ctx context.Context, cred WebAuthnCredential) error {
+	if strings.TrimSpace(cred.CredentialID) == "" || strings.TrimSpace(cred.ActorID) == "" {
+		return fmt.Errorf("credential_id and actor_id are required")
+	}
+	if len(cred.PublicKey) == 0 {
+		return fmt.Errorf("public key is required")
+	}
+	if strings.TrimSpace(cred.RPID) == "" {
+		return fmt.Errorf("rp_id is required")
+	}
+	_, err := s.DB.Exec(ctx, `
+INSERT INTO webauthn_credentials(credential_id,actor_id,public_key_cbor,sign_count,rp_id,transports,revoked_at,last_used_at)
+VALUES($1,$2,$3,$4,$5,$6,NULL,NULL)
+ON CONFLICT (credential_id) DO UPDATE SET
+  actor_id=EXCLUDED.actor_id,
+  public_key_cbor=EXCLUDED.public_key_cbor,
+  sign_count=EXCLUDED.sign_count,
+  rp_id=EXCLUDED.rp_id,
+  transports=EXCLUDED.transports,
+  revoked_at=NULL
+`, cred.CredentialID, cred.ActorID, cred.PublicKey, cred.SignCount, cred.RPID, cred.Transports)
+	return err
+}
+
+func (s *Store) GetWebAuthnCredential(ctx context.Context, principalID, actorID, credentialID string) (WebAuthnCredential, error) {
+	var out WebAuthnCredential
+	err := s.DB.QueryRow(ctx, `
+SELECT c.credential_id,a.principal_id,c.actor_id,c.public_key_cbor,c.sign_count,c.rp_id,c.transports,c.created_at,c.last_used_at,c.revoked_at
+FROM webauthn_credentials c
+JOIN actors a ON a.actor_id=c.actor_id
+WHERE c.credential_id=$1 AND c.actor_id=$2 AND a.principal_id=$3
+`, credentialID, actorID, principalID).Scan(
+		&out.CredentialID,
+		&out.PrincipalID,
+		&out.ActorID,
+		&out.PublicKey,
+		&out.SignCount,
+		&out.RPID,
+		&out.Transports,
+		&out.CreatedAt,
+		&out.LastUsedAt,
+		&out.RevokedAt,
+	)
+	if err != nil {
+		return WebAuthnCredential{}, err
+	}
+	return out, nil
+}
+
+func (s *Store) ListActiveWebAuthnCredentialsByActor(ctx context.Context, principalID, actorID, rpID string) ([]WebAuthnCredential, error) {
+	rows, err := s.DB.Query(ctx, `
+SELECT c.credential_id,a.principal_id,c.actor_id,c.public_key_cbor,c.sign_count,c.rp_id,c.transports,c.created_at,c.last_used_at,c.revoked_at
+FROM webauthn_credentials c
+JOIN actors a ON a.actor_id=c.actor_id
+WHERE c.actor_id=$1 AND a.principal_id=$2 AND c.revoked_at IS NULL AND c.rp_id=$3
+ORDER BY c.created_at ASC, c.credential_id ASC
+`, actorID, principalID, rpID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []WebAuthnCredential{}
+	for rows.Next() {
+		var c WebAuthnCredential
+		if err := rows.Scan(
+			&c.CredentialID,
+			&c.PrincipalID,
+			&c.ActorID,
+			&c.PublicKey,
+			&c.SignCount,
+			&c.RPID,
+			&c.Transports,
+			&c.CreatedAt,
+			&c.LastUsedAt,
+			&c.RevokedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateWebAuthnCredentialUsage(ctx context.Context, credentialID string, signCount int64, usedAt time.Time) error {
+	_, err := s.DB.Exec(ctx, `
+UPDATE webauthn_credentials
+SET sign_count=$2,last_used_at=$3
+WHERE credential_id=$1
+`, credentialID, signCount, usedAt.UTC())
+	return err
+}
+
+func (s *Store) CreateWebAuthnChallenge(ctx context.Context, ch WebAuthnChallenge) error {
+	_, err := s.DB.Exec(ctx, `
+INSERT INTO webauthn_challenges(
+  challenge_id,challenge_type,principal_id,actor_id,approval_request_id,payload_hash,context,challenge_bytes,expires_at
+)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+`, ch.ChallengeID, ch.ChallengeType, ch.PrincipalID, ch.ActorID, ch.ApprovalRequestID, ch.PayloadHash, ch.Context, ch.ChallengeBytes, ch.ExpiresAt.UTC())
+	return err
+}
+
+func (s *Store) ConsumeWebAuthnChallenge(ctx context.Context, challengeID, principalID, actorID, challengeType string) (WebAuthnChallenge, error) {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return WebAuthnChallenge{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var ch WebAuthnChallenge
+	err = tx.QueryRow(ctx, `
+SELECT challenge_id,challenge_type,principal_id,actor_id,approval_request_id,payload_hash,context,challenge_bytes,expires_at,used_at,created_at
+FROM webauthn_challenges
+WHERE challenge_id=$1
+FOR UPDATE
+`, challengeID).Scan(
+		&ch.ChallengeID,
+		&ch.ChallengeType,
+		&ch.PrincipalID,
+		&ch.ActorID,
+		&ch.ApprovalRequestID,
+		&ch.PayloadHash,
+		&ch.Context,
+		&ch.ChallengeBytes,
+		&ch.ExpiresAt,
+		&ch.UsedAt,
+		&ch.CreatedAt,
+	)
+	if err != nil {
+		return WebAuthnChallenge{}, err
+	}
+	now := time.Now().UTC()
+	if ch.UsedAt != nil {
+		return WebAuthnChallenge{}, ErrWebAuthnChallengeUsed
+	}
+	if !ch.ExpiresAt.After(now) {
+		return WebAuthnChallenge{}, ErrWebAuthnChallengeExpired
+	}
+	if strings.TrimSpace(ch.PrincipalID) != strings.TrimSpace(principalID) ||
+		strings.TrimSpace(ch.ActorID) != strings.TrimSpace(actorID) ||
+		strings.TrimSpace(ch.ChallengeType) != strings.TrimSpace(challengeType) {
+		return WebAuthnChallenge{}, ErrWebAuthnChallengeMismatch
+	}
+	_, err = tx.Exec(ctx, `
+UPDATE webauthn_challenges
+SET used_at=$2
+WHERE challenge_id=$1
+`, challengeID, now)
+	if err != nil {
+		return WebAuthnChallenge{}, err
+	}
+	ch.UsedAt = &now
+	if err := tx.Commit(ctx); err != nil {
+		return WebAuthnChallenge{}, err
+	}
+	return ch, nil
+}

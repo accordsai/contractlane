@@ -1888,12 +1888,12 @@ func main() {
 		api.Post("/approvals/{approval_request_id}:decide", func(w http.ResponseWriter, r *http.Request) {
 			aprq := chi.URLParam(r, "approval_request_id")
 			var req struct {
-				ActorContext      actorContext           `json:"actor_context"`
-				Decision          string                 `json:"decision"`
-				SignedPayload     map[string]any         `json:"signed_payload"`
-				SignedPayloadHash string                 `json:"signed_payload_hash"`
-				Signature         map[string]any         `json:"signature"`
-				SignatureEnvelope signaturev1.Envelope   `json:"signature_envelope"`
+				ActorContext      actorContext   `json:"actor_context"`
+				Decision          string         `json:"decision"`
+				SignedPayload     map[string]any `json:"signed_payload"`
+				SignedPayloadHash string         `json:"signed_payload_hash"`
+				Signature         map[string]any `json:"signature"`
+				SignatureEnvelope map[string]any `json:"signature_envelope"`
 			}
 			if err := httpx.ReadJSON(r, &req); err != nil {
 				httpx.WriteError(w, 400, "BAD_JSON", err.Error(), nil)
@@ -1927,16 +1927,47 @@ func main() {
 					return
 				}
 			}
-			useSigV1Envelope := strings.TrimSpace(req.SignatureEnvelope.Version) != "" ||
-				strings.TrimSpace(req.SignatureEnvelope.Algorithm) != "" ||
-				strings.TrimSpace(req.SignatureEnvelope.Signature) != ""
-			if useSigV1Envelope {
-				if ctx := strings.TrimSpace(req.SignatureEnvelope.Context); ctx != "" && ctx != "contract-action" {
+			useSignatureEnvelope := len(req.SignatureEnvelope) > 0
+			if useSignatureEnvelope {
+				version := strings.TrimSpace(fmt.Sprint(req.SignatureEnvelope["version"]))
+				context := strings.TrimSpace(fmt.Sprint(req.SignatureEnvelope["context"]))
+				if context != "" && context != "contract-action" {
 					httpx.WriteError(w, 403, "BAD_SIGNATURE", "signature envelope context must be contract-action", nil)
 					return
 				}
-				if _, err := signaturev1.VerifyEnvelope(req.SignedPayload, req.SignatureEnvelope); err != nil {
-					httpx.WriteError(w, 403, "BAD_SIGNATURE", "signature envelope verification failed", map[string]any{"reason": err.Error()})
+				switch version {
+				case "sig-v1", "sig-v2":
+					envBytes, _ := json.Marshal(req.SignatureEnvelope)
+					var env signaturev1.Envelope
+					if err := json.Unmarshal(envBytes, &env); err != nil {
+						httpx.WriteError(w, 403, "BAD_SIGNATURE", "invalid signature envelope", nil)
+						return
+					}
+					if _, err := signaturev1.VerifyEnvelope(req.SignedPayload, env); err != nil {
+						httpx.WriteError(w, 403, "BAD_SIGNATURE", "signature envelope verification failed", map[string]any{"reason": err.Error()})
+						return
+					}
+				case "sig-v3":
+					verifyResp, err := ial.VerifySignatureAdvanced(ialclient.VerifySignatureRequest{
+						PrincipalID:       req.ActorContext.PrincipalID,
+						ActorID:           req.ActorContext.ActorID,
+						SignatureType:     "sig-v3-webauthn",
+						PayloadHash:       signedPayloadHashHex,
+						Context:           "contract-action",
+						SignatureEnvelope: req.SignatureEnvelope,
+					}, r.Header.Get("Authorization"))
+					if err != nil || !verifyResp.Valid {
+						reason := "signature verification failed"
+						if err != nil {
+							reason = err.Error()
+						} else if strings.TrimSpace(verifyResp.Reason) != "" {
+							reason = verifyResp.Reason
+						}
+						httpx.WriteError(w, 403, "BAD_SIGNATURE", "signature verification failed", map[string]any{"reason": reason})
+						return
+					}
+				default:
+					httpx.WriteError(w, 403, "BAD_SIGNATURE", "unsupported signature envelope version", nil)
 					return
 				}
 			} else {
@@ -1983,8 +2014,8 @@ func main() {
 				for k, v := range req.Signature {
 					signatureWithHashes[k] = v
 				}
-				if useSigV1Envelope {
-					signatureWithHashes["signature_envelope"] = signatureEnvelopeToMap(req.SignatureEnvelope)
+				if useSignatureEnvelope {
+					signatureWithHashes["signature_envelope"] = req.SignatureEnvelope
 				}
 				signatureWithHashes["hashes"] = map[string]any{
 					"packet_hash": artifacts["packet_hash"],
@@ -2017,8 +2048,8 @@ func main() {
 			for k, v := range req.Signature {
 				signatureWithHashes[k] = v
 			}
-			if useSigV1Envelope {
-				signatureWithHashes["signature_envelope"] = signatureEnvelopeToMap(req.SignatureEnvelope)
+			if useSignatureEnvelope {
+				signatureWithHashes["signature_envelope"] = req.SignatureEnvelope
 			}
 			signatureWithHashes["hashes"] = map[string]any{
 				"packet_hash": artifacts["packet_hash"],
@@ -3298,24 +3329,6 @@ func normalizeHexHash(v string) string {
 		return ""
 	}
 	return s
-}
-
-func signatureEnvelopeToMap(env signaturev1.Envelope) map[string]any {
-	out := map[string]any{
-		"version":      env.Version,
-		"algorithm":    env.Algorithm,
-		"public_key":   env.PublicKey,
-		"signature":    env.Signature,
-		"payload_hash": env.PayloadHash,
-		"issued_at":    env.IssuedAt,
-	}
-	if strings.TrimSpace(env.KeyID) != "" {
-		out["key_id"] = env.KeyID
-	}
-	if strings.TrimSpace(env.Context) != "" {
-		out["context"] = env.Context
-	}
-	return out
 }
 
 func requireAgentScope(r *http.Request, w http.ResponseWriter, pool *pgxpool.Pool, actor actorContext, endpoint, requiredScope string) bool {

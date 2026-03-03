@@ -48,6 +48,7 @@ Delegation authorization failures use stable `reason` values:
 - `ENABLE_HOSTED_COMMERCE` (default `true`)
 - `ENABLE_PROOF_EXPORT` (default `true`)
 - `ENABLE_PROOF_BUNDLE_EXPORT` (default `true`)
+- `ENABLE_SIG_V3_WEBAUTHN` (default `true`)
 - `ENABLE_SERVER_DERIVED_SETTLEMENT_ATTESTATIONS` (default `false`)
 
 Transport protections:

@@ -1,4 +1,4 @@
-import { createHmac, createHash, randomUUID, randomBytes, sign as cryptoSign, verify as cryptoVerify, createPrivateKey, createPublicKey, KeyObject } from 'crypto';
+import { createHmac, createHash, randomUUID, randomBytes, sign as cryptoSign, verify as cryptoVerify, createPrivateKey, createPublicKey, timingSafeEqual, KeyObject } from 'crypto';
 import nacl from 'tweetnacl';
 
 export const API_VERSION = 'v1';
@@ -160,7 +160,20 @@ export type SignatureEnvelopeV2 = {
   context?: string;
   key_id?: string;
 };
-export type SignatureEnvelope = SignatureEnvelopeV1 | SignatureEnvelopeV2;
+export type SignatureEnvelopeV3 = {
+  version: 'sig-v3';
+  algorithm: 'webauthn-es256';
+  credential_id: string;
+  challenge_id: string;
+  client_data_json: string;
+  authenticator_data: string;
+  signature: string; // base64url no padding DER ECDSA
+  payload_hash: string;
+  issued_at: string;
+  context?: string;
+  key_id?: string;
+};
+export type SignatureEnvelope = SignatureEnvelopeV1 | SignatureEnvelopeV2 | SignatureEnvelopeV3;
 export type DelegationRevocationV1 = {
   version: 'delegation-revocation-v1';
   revocation_id: string;
@@ -235,6 +248,7 @@ export type Capabilities = {
   protocol: { name?: string; versions?: string[] };
   evidence: { bundle_versions?: string[]; always_present_artifacts?: string[] };
   signatures: { envelopes?: string[]; algorithms?: string[] };
+  webauthn?: { approval_sig_v3?: boolean; uv_required?: boolean };
   features?: Record<string, unknown>;
 };
 
@@ -584,6 +598,29 @@ export class ContractLaneClient {
     }
   }
 
+  async requireProtocolV3WebAuthn(): Promise<void> {
+    const caps = await this.fetchCapabilities();
+    const missing: string[] = [];
+    const protocolName = caps.protocol?.name;
+    const protocolVersions = caps.protocol?.versions ?? [];
+    const evidenceBundleVersions = caps.evidence?.bundle_versions ?? [];
+    const evidenceAlwaysPresent = caps.evidence?.always_present_artifacts ?? [];
+    const signatureEnvelopes = caps.signatures?.envelopes ?? [];
+    const signatureAlgorithms = caps.signatures?.algorithms ?? [];
+
+    if (protocolName !== 'contractlane') missing.push('protocol.name:contractlane');
+    if (!protocolVersions.includes('v1')) missing.push('protocol.versions:v1');
+    if (!evidenceBundleVersions.includes('evidence-v1')) missing.push('evidence.bundle_versions:evidence-v1');
+    if (!signatureEnvelopes.includes('sig-v3')) missing.push('signatures.envelopes:sig-v3');
+    if (!signatureAlgorithms.includes('webauthn-es256')) missing.push('signatures.algorithms:webauthn-es256');
+    if (!evidenceAlwaysPresent.includes('anchors')) missing.push('evidence.always_present_artifacts:anchors');
+    if (!evidenceAlwaysPresent.includes('webhook_receipts')) missing.push('evidence.always_present_artifacts:webhook_receipts');
+
+    if (missing.length > 0) {
+      throw new IncompatibleNodeError(missing);
+    }
+  }
+
   async approvalDecide(approvalRequestId: string, input: ApprovalDecideInput): Promise<Record<string, unknown>> {
     const body: Record<string, unknown> = {
       actor_context: input.actor_context,
@@ -609,6 +646,11 @@ export class ContractLaneClient {
       body.signature_envelope = env;
       body.signed_payload_hash = env.payload_hash;
     } else if (input.signature_envelope) {
+      if (!this.disableCapabilityCheck) {
+        if (input.signature_envelope.version === 'sig-v1') await this.requireProtocolV1();
+        else if (input.signature_envelope.version === 'sig-v2') await this.requireProtocolV2ES256();
+        else if (input.signature_envelope.version === 'sig-v3') await this.requireProtocolV3WebAuthn();
+      }
       body.signature_envelope = input.signature_envelope;
     } else {
       body.signature = input.signature ?? { type: 'WEBAUTHN_ASSERTION', assertion_response: {} };
@@ -949,11 +991,30 @@ export function parseSigV2(sig: SignatureEnvelopeV2, expectedContext?: string): 
   return sig;
 }
 
+export function parseSigV3(sig: SignatureEnvelopeV3, expectedContext?: string): SignatureEnvelopeV3 {
+  const allowed = new Set(['version', 'algorithm', 'credential_id', 'challenge_id', 'client_data_json', 'authenticator_data', 'signature', 'payload_hash', 'issued_at', 'context', 'key_id']);
+  for (const k of Object.keys(sig as Record<string, unknown>)) if (!allowed.has(k)) throw new Error(`unknown signature key: ${k}`);
+  if (sig.version !== 'sig-v3') throw new Error('signature_envelope version must be sig-v3');
+  if (sig.algorithm !== 'webauthn-es256') throw new Error('signature_envelope algorithm must be webauthn-es256');
+  if (!/^[0-9a-f]{64}$/.test(sig.payload_hash)) throw new Error('payload_hash must be lowercase hex sha256');
+  parseRFC3339UTC(sig.issued_at, 'issued_at');
+  if (expectedContext && sig.context && sig.context !== expectedContext) throw new Error('signature context mismatch');
+  base64URLNoPaddingToBytes(sig.credential_id, 'credential_id');
+  if (!String(sig.challenge_id ?? '').trim()) throw new Error('challenge_id is required');
+  const clientData = base64URLNoPaddingToBytes(sig.client_data_json, 'client_data_json');
+  const authData = base64URLNoPaddingToBytes(sig.authenticator_data, 'authenticator_data');
+  if (authData.length < 37) throw new Error('invalid authenticator_data');
+  base64URLNoPaddingToBytes(sig.signature, 'signature');
+  JSON.parse(Buffer.from(clientData).toString('utf8'));
+  return sig;
+}
+
 export function parseSignatureEnvelope(sig: SignatureEnvelope, expectedContext?: string): SignatureEnvelope {
   if (!sig || typeof sig !== 'object') throw new Error('signature_envelope must be object');
   if (sig.version === 'sig-v1') return parseSigV1(sig as SignatureEnvelopeV1, expectedContext);
   if (sig.version === 'sig-v2') return parseSigV2(sig as SignatureEnvelopeV2, expectedContext);
-  throw new Error('signature_envelope version must be sig-v1 or sig-v2');
+  if (sig.version === 'sig-v3') return parseSigV3(sig as SignatureEnvelopeV3, expectedContext);
+  throw new Error('signature_envelope version must be sig-v1 or sig-v2 or sig-v3');
 }
 
 export function normalizeAmountV1(currency: string, minorUnits: number): CommerceAmountV1 {
@@ -1300,6 +1361,10 @@ function verifySignatureEnvelope(payload: any, sig: SignatureEnvelope, expectedC
     return;
   }
 
+  if (parsed.version === 'sig-v3') {
+    throw new Error('sig-v3 verification requires verifySigV3 with webauthn options');
+  }
+
   const pub = p256PublicKeyFromSec1Uncompressed(base64URLNoPaddingToBytes(parsed.public_key, 'signature public key'));
   const sigCompat = parseES256SignatureCompat(parsed.signature);
   if (sigCompat.raw64) {
@@ -1309,7 +1374,101 @@ function verifySignatureEnvelope(payload: any, sig: SignatureEnvelope, expectedC
   if (!sigCompat.der || !cryptoVerify(null, msg, pub, sigCompat.der)) throw new Error('invalid signature');
 }
 
+export type VerifySigV3Options = {
+  expectedContext?: string;
+  expectedChallengeB64URL?: string;
+  allowedOrigins?: string[];
+  expectedRPID?: string;
+  expectedCredentialID?: string;
+  credentialPublicKeySec1: Uint8Array;
+  previousSignCount?: number;
+};
+
+export function verifySigV3(payload: any, sig: SignatureEnvelopeV3, opts: VerifySigV3Options): { signCount: number; origin: string } {
+  const parsed = parseSigV3(sig, opts.expectedContext);
+  const expectedHash = canonicalSha256Hex(payload);
+  if (parsed.payload_hash !== expectedHash) throw new Error('payload hash mismatch');
+
+  if (opts.expectedCredentialID && opts.expectedCredentialID !== parsed.credential_id) {
+    throw new Error('credential_id mismatch');
+  }
+  const clientDataJSON = Buffer.from(base64URLNoPaddingToBytes(parsed.client_data_json, 'client_data_json'));
+  const authenticatorData = Buffer.from(base64URLNoPaddingToBytes(parsed.authenticator_data, 'authenticator_data'));
+  const derSig = Buffer.from(base64URLNoPaddingToBytes(parsed.signature, 'signature'));
+
+  let clientData: any;
+  try {
+    clientData = JSON.parse(clientDataJSON.toString('utf8'));
+  } catch {
+    throw new Error('invalid client_data_json');
+  }
+  if (String(clientData?.type ?? '').trim() !== 'webauthn.get') throw new Error('invalid webauthn client data type');
+
+  if (opts.expectedChallengeB64URL) {
+    const got = Buffer.from(base64URLNoPaddingToBytes(String(clientData?.challenge ?? ''), 'client_data_json.challenge'));
+    const want = Buffer.from(base64URLNoPaddingToBytes(opts.expectedChallengeB64URL, 'expectedChallengeB64URL'));
+    if (got.length !== want.length || !timingSafeEqual(got, want)) throw new Error('webauthn challenge mismatch');
+  }
+  if (opts.allowedOrigins && opts.allowedOrigins.length > 0) {
+    const origin = String(clientData?.origin ?? '');
+    if (!opts.allowedOrigins.includes(origin)) throw new Error('webauthn origin mismatch');
+  }
+
+  const flags = authenticatorData[32];
+  if ((flags & 0x01) === 0) throw new Error('webauthn user presence required');
+  if ((flags & 0x04) === 0) throw new Error('webauthn user verification required');
+  const signCount = authenticatorData.readUInt32BE(33);
+  if ((opts.previousSignCount ?? 0) > 0 && signCount > 0 && signCount <= (opts.previousSignCount ?? 0)) {
+    throw new Error('webauthn sign_count regression');
+  }
+
+  if (opts.expectedRPID) {
+    const expectedRpHash = createHash('sha256').update(opts.expectedRPID).digest();
+    const gotRpHash = authenticatorData.subarray(0, 32);
+    if (!timingSafeEqual(expectedRpHash, gotRpHash)) throw new Error('webauthn rpIdHash mismatch');
+  }
+
+  const pub = p256PublicKeyFromSec1Uncompressed(opts.credentialPublicKeySec1);
+  const signedData = Buffer.concat([authenticatorData, createHash('sha256').update(clientDataJSON).digest()]);
+  if (!cryptoVerify('sha256', signedData, pub, derSig)) throw new Error('invalid signature');
+  return { signCount, origin: String(clientData?.origin ?? '') };
+}
+
+export type BuildSigV3Input = {
+  payload: any;
+  challengeId: string;
+  context?: string;
+  issuedAt: Date;
+  assertion: {
+    credentialId: Uint8Array;
+    clientDataJSON: Uint8Array;
+    authenticatorData: Uint8Array;
+    signatureDER: Uint8Array;
+  };
+  keyId?: string;
+};
+
+export function buildSigV3FromWebAuthnAssertion(input: BuildSigV3Input): SignatureEnvelopeV3 {
+  const payloadHash = canonicalSha256Hex(input.payload);
+  return {
+    version: 'sig-v3',
+    algorithm: 'webauthn-es256',
+    credential_id: bytesToBase64URLNoPadding(input.assertion.credentialId),
+    challenge_id: String(input.challengeId || '').trim(),
+    client_data_json: bytesToBase64URLNoPadding(input.assertion.clientDataJSON),
+    authenticator_data: bytesToBase64URLNoPadding(input.assertion.authenticatorData),
+    signature: bytesToBase64URLNoPadding(input.assertion.signatureDER),
+    payload_hash: payloadHash,
+    issued_at: input.issuedAt.toISOString(),
+    context: input.context ?? 'contract-action',
+    ...(input.keyId ? { key_id: input.keyId } : {}),
+  };
+}
+
 function agentIdFromSignatureEnvelope(sig: SignatureEnvelope): string {
+  if (sig.version === 'sig-v3') {
+    throw new Error('sig-v3 agent binding requires credential lookup');
+  }
   if (sig.algorithm === 'ed25519') {
     return agentIdFromPublicKey(Buffer.from(sig.public_key, 'base64'));
   }

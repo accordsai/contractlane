@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/accordsai/contractlane/pkg/evidencehash"
+	signaturev1 "github.com/accordsai/contractlane/pkg/signature"
 )
 
 type VerifyFailureCode string
@@ -120,6 +121,26 @@ func ParseSigV2EnvelopeV2Strict(v any) (SignatureEnvelopeV2, error) {
 		return SignatureEnvelopeV2{}, err
 	}
 	return out, nil
+}
+
+func ParseSigV3EnvelopeV3Strict(v any) (SignatureEnvelopeV3, error) {
+	parsed, err := signaturev1.ParseEnvelopeV3Strict(v)
+	if err != nil {
+		return SignatureEnvelopeV3{}, err
+	}
+	return SignatureEnvelopeV3{
+		Version:           parsed.Version,
+		Algorithm:         parsed.Algorithm,
+		CredentialID:      parsed.CredentialID,
+		ChallengeID:       parsed.ChallengeID,
+		ClientDataJSON:    parsed.ClientDataJSON,
+		AuthenticatorData: parsed.AuthenticatorData,
+		Signature:         parsed.Signature,
+		PayloadHash:       parsed.PayloadHash,
+		IssuedAt:          parsed.IssuedAt,
+		KeyID:             parsed.KeyID,
+		Context:           parsed.Context,
+	}, nil
 }
 
 func NormalizeAmountV1(a CommerceAmountV1) (CommerceAmountV1, error) {

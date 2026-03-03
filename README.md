@@ -51,6 +51,8 @@ NOTE: to make this production safe you will need some kind of SSL termination, o
 - `docs/TEMPLATE_LINT_ERRORS.md`
 - `docs/PROTOCOL.md`
 - `docs/SIG_V1.md`
+- `docs/SIG_V2.md`
+- `docs/SIG_V3.md`
 - `docs/AGENT_ID_V1.md`
 - `docs/EVIDENCE_V1.md`
 - `docs/AMOUNT_V1.md`

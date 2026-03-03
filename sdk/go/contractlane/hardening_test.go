@@ -71,6 +71,27 @@ func TestParseSigV2EnvelopeV2Strict_HappyPath(t *testing.T) {
 	}
 }
 
+func TestParseSigV3EnvelopeV3Strict_HappyPath(t *testing.T) {
+	parsed, err := ParseSigV3EnvelopeV3Strict(map[string]any{
+		"version":            "sig-v3",
+		"algorithm":          "webauthn-es256",
+		"credential_id":      "Y3JlZF8x",
+		"challenge_id":       "wch_1",
+		"client_data_json":   "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoiWVdKaiIsIm9yaWdpbiI6Imh0dHBzOi8vYXBwLmV4YW1wbGUuY29tIn0",
+		"authenticator_data": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFAAAAAQ",
+		"signature":          "MAYCAQACAQE",
+		"payload_hash":       strings.Repeat("a", 64),
+		"issued_at":          "2026-02-20T01:02:03Z",
+		"context":            "contract-action",
+	})
+	if err != nil {
+		t.Fatalf("ParseSigV3EnvelopeV3Strict: %v", err)
+	}
+	if parsed.Version != "sig-v3" || parsed.Algorithm != "webauthn-es256" {
+		t.Fatalf("unexpected parsed envelope: %+v", parsed)
+	}
+}
+
 func TestSigV2Sign_ProducesVerifiableEnvelope(t *testing.T) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

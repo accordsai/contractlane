@@ -34,3 +34,4 @@ Optional:
 
 - `sig-v1` semantics are unchanged and remain Ed25519-only.
 - P-256 support is additive via `sig-v2` (`docs/SIG_V2.md`).
+- Browser WebAuthn approval signatures are additive via `sig-v3` (`docs/SIG_V3.md`).

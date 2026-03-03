@@ -199,6 +199,38 @@ class ContractLaneClient:
         if missing:
             raise IncompatibleNodeError(missing)
 
+    def require_protocol_v3_webauthn(self) -> None:
+        caps = self.fetch_capabilities()
+        missing: List[str] = []
+
+        protocol = caps.get("protocol") if isinstance(caps, dict) else {}
+        evidence = caps.get("evidence") if isinstance(caps, dict) else {}
+        signatures = caps.get("signatures") if isinstance(caps, dict) else {}
+
+        protocol_name = protocol.get("name") if isinstance(protocol, dict) else None
+        protocol_versions = protocol.get("versions") if isinstance(protocol, dict) else []
+        evidence_bundle_versions = evidence.get("bundle_versions") if isinstance(evidence, dict) else []
+        evidence_always_present = evidence.get("always_present_artifacts") if isinstance(evidence, dict) else []
+        signatures_envelopes = signatures.get("envelopes") if isinstance(signatures, dict) else []
+        signatures_algorithms = signatures.get("algorithms") if isinstance(signatures, dict) else []
+
+        if protocol_name != "contractlane":
+            missing.append("protocol.name=contractlane")
+        if not isinstance(protocol_versions, list) or "v1" not in protocol_versions:
+            missing.append("protocol.versions contains v1")
+        if not isinstance(evidence_bundle_versions, list) or "evidence-v1" not in evidence_bundle_versions:
+            missing.append("evidence.bundle_versions contains evidence-v1")
+        if not isinstance(signatures_envelopes, list) or "sig-v3" not in signatures_envelopes:
+            missing.append("signatures.envelopes contains sig-v3")
+        if not isinstance(signatures_algorithms, list) or "webauthn-es256" not in signatures_algorithms:
+            missing.append("signatures.algorithms contains webauthn-es256")
+        if not isinstance(evidence_always_present, list) or "anchors" not in evidence_always_present:
+            missing.append("evidence.always_present_artifacts contains anchors")
+        if not isinstance(evidence_always_present, list) or "webhook_receipts" not in evidence_always_present:
+            missing.append("evidence.always_present_artifacts contains webhook_receipts")
+        if missing:
+            raise IncompatibleNodeError(missing)
+
     def gate_status(self, gate_key: str, external_subject_id: str) -> Dict[str, Any]:
         path = f"/cel/gates/{quote(gate_key, safe='')}/status?external_subject_id={quote(external_subject_id, safe='')}"
         return self._request("GET", path, None, None, True)
@@ -494,6 +526,14 @@ class ContractLaneClient:
             body["signed_payload_hash"] = signed_payload_hash
 
         if signature_envelope is not None:
+            if not self.disable_capability_check:
+                version = str(signature_envelope.get("version", "")).strip()
+                if version == "sig-v1":
+                    self.require_protocol_v1()
+                elif version == "sig-v2":
+                    self.require_protocol_v2_es256()
+                elif version == "sig-v3":
+                    self.require_protocol_v3_webauthn()
             body["signature_envelope"] = signature_envelope
         else:
             body["signature"] = signature or {"type": "WEBAUTHN_ASSERTION", "assertion_response": {}}
@@ -1163,13 +1203,123 @@ def parse_sig_v2(sig: Dict[str, Any], expected_context: Optional[str] = None) ->
     return sig
 
 
+def parse_sig_v3(sig: Dict[str, Any], expected_context: Optional[str] = None) -> Dict[str, Any]:
+    if not isinstance(sig, dict):
+        raise ValueError("signature_envelope must be object")
+    allowed = {
+        "version",
+        "algorithm",
+        "credential_id",
+        "challenge_id",
+        "client_data_json",
+        "authenticator_data",
+        "signature",
+        "payload_hash",
+        "issued_at",
+        "key_id",
+        "context",
+    }
+    unknown = set(sig.keys()) - allowed
+    if unknown:
+        raise ValueError(f"unknown signature keys: {sorted(unknown)}")
+    if sig.get("version") != "sig-v3":
+        raise ValueError("signature_envelope version must be sig-v3")
+    if sig.get("algorithm") != "webauthn-es256":
+        raise ValueError("signature_envelope algorithm must be webauthn-es256")
+    payload_hash = str(sig.get("payload_hash", ""))
+    if re.fullmatch(r"[0-9a-f]{64}", payload_hash) is None:
+        raise ValueError("payload_hash must be lowercase hex sha256")
+    _parse_rfc3339_utc(str(sig.get("issued_at", "")), "issued_at")
+    if expected_context and sig.get("context") not in (None, "", expected_context):
+        raise ValueError("signature context mismatch")
+    _decode_base64url_no_padding(str(sig.get("credential_id", "")), "credential_id")
+    if not str(sig.get("challenge_id", "")).strip():
+        raise ValueError("challenge_id is required")
+    _decode_base64url_no_padding(str(sig.get("client_data_json", "")), "client_data_json")
+    auth_data = _decode_base64url_no_padding(str(sig.get("authenticator_data", "")), "authenticator_data")
+    if len(auth_data) < 37:
+        raise ValueError("invalid authenticator_data")
+    sig_der = _decode_base64url_no_padding(str(sig.get("signature", "")), "signature")
+    if not sig_der:
+        raise ValueError("invalid signature encoding")
+    return sig
+
+
 def parse_signature_envelope(sig: Dict[str, Any], expected_context: Optional[str] = None) -> Dict[str, Any]:
     version = str((sig or {}).get("version", ""))
     if version == "sig-v1":
         return parse_sig_v1(sig, expected_context)
     if version == "sig-v2":
         return parse_sig_v2(sig, expected_context)
-    raise ValueError("signature_envelope version must be sig-v1 or sig-v2")
+    if version == "sig-v3":
+        return parse_sig_v3(sig, expected_context)
+    raise ValueError("signature_envelope version must be sig-v1 or sig-v2 or sig-v3")
+
+
+def verify_sig_v3(payload: Dict[str, Any], sig: Dict[str, Any], opts: Dict[str, Any]) -> None:
+    _require_crypto_backend()
+    parsed = parse_sig_v3(sig, opts.get("expected_context") if isinstance(opts, dict) else None)
+    expected_hash = _canonical_sha256_hex(payload)
+    if parsed.get("payload_hash") != expected_hash:
+        raise ValueError("payload hash mismatch")
+
+    credential_id = str(parsed.get("credential_id", "")).strip()
+    expected_credential_id = str((opts or {}).get("expected_credential_id", "")).strip()
+    if expected_credential_id and expected_credential_id != credential_id:
+        raise ValueError("credential_id mismatch")
+
+    client_data_json = _decode_base64url_no_padding(str(parsed.get("client_data_json", "")), "client_data_json")
+    try:
+        client_data = json.loads(client_data_json.decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("invalid client_data_json") from exc
+    if str(client_data.get("type", "")).strip() != "webauthn.get":
+        raise ValueError("invalid webauthn client data type")
+
+    expected_challenge = (opts or {}).get("expected_challenge_b64url")
+    if expected_challenge:
+        got_challenge = _decode_base64url_no_padding(str(client_data.get("challenge", "")), "client_data_json.challenge")
+        want_challenge = _decode_base64url_no_padding(str(expected_challenge), "expected_challenge_b64url")
+        if got_challenge != want_challenge:
+            raise ValueError("webauthn challenge mismatch")
+
+    allowed_origins = (opts or {}).get("allowed_origins")
+    if allowed_origins:
+        if str(client_data.get("origin", "")) not in [str(x) for x in allowed_origins]:
+            raise ValueError("webauthn origin mismatch")
+
+    auth_data = _decode_base64url_no_padding(str(parsed.get("authenticator_data", "")), "authenticator_data")
+    if len(auth_data) < 37:
+        raise ValueError("invalid authenticator_data")
+    flags = auth_data[32]
+    if (flags & 0x01) == 0:
+        raise ValueError("webauthn user presence required")
+    if (flags & 0x04) == 0:
+        raise ValueError("webauthn user verification required")
+
+    expected_rp_id = str((opts or {}).get("expected_rp_id", "")).strip()
+    if expected_rp_id:
+        rp_hash = hashlib.sha256(expected_rp_id.encode("utf-8")).digest()
+        if auth_data[:32] != rp_hash:
+            raise ValueError("webauthn rpIdHash mismatch")
+
+    sign_count = int.from_bytes(auth_data[33:37], "big")
+    prev_sign_count = int((opts or {}).get("previous_sign_count", 0) or 0)
+    if prev_sign_count > 0 and sign_count > 0 and sign_count <= prev_sign_count:
+        raise ValueError("webauthn sign_count regression")
+
+    pub_sec1 = _decode_base64url_no_padding(str((opts or {}).get("credential_public_key_sec1", "")), "credential_public_key_sec1")
+    try:
+        public_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pub_sec1)
+    except Exception as exc:
+        raise ValueError("invalid credential public key") from exc
+
+    sig_der = _decode_base64url_no_padding(str(parsed.get("signature", "")), "signature")
+    signed_data = auth_data + hashlib.sha256(client_data_json).digest()
+    try:
+        public_key.verify(sig_der, signed_data, ec.ECDSA(hashes.SHA256()))
+    except CryptoInvalidSignature as exc:
+        raise ValueError("invalid signature") from exc
 
 
 def normalize_amount_v1(currency: str, minor_units: int) -> Dict[str, str]:
@@ -1419,6 +1569,8 @@ def _verify_signature_envelope(payload: Dict[str, Any], sig: Dict[str, Any], exp
         signature = base64.b64decode(str(parsed.get("signature", "")))
         VerifyKey(pub).verify(message, signature)
         return
+    if parsed.get("version") == "sig-v3":
+        raise ValueError("sig-v3 verification requires verify_sig_v3 with webauthn options")
 
     pub_bytes = _decode_base64url_no_padding(str(parsed.get("public_key", "")), "signature public key")
     _require_crypto_backend()

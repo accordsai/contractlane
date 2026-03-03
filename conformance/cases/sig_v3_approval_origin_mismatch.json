@@ -1,0 +1,4 @@
+{
+  "name": "sig_v3_approval_origin_mismatch",
+  "description": "sig-v3 assertion fails when WebAuthn clientData origin is not allowlisted."
+}

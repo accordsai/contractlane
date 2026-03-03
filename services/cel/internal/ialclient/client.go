@@ -42,6 +42,21 @@ type Subject struct {
 	Status            string `json:"status"`
 }
 
+type VerifySignatureRequest struct {
+	PrincipalID       string         `json:"principal_id"`
+	ActorID           string         `json:"actor_id"`
+	SignatureType     string         `json:"signature_type"`
+	PayloadHash       string         `json:"payload_hash,omitempty"`
+	Context           string         `json:"context,omitempty"`
+	SignatureEnvelope map[string]any `json:"signature_envelope,omitempty"`
+}
+
+type VerifySignatureResponse struct {
+	Valid       bool   `json:"valid"`
+	Reason      string `json:"reason"`
+	ActorStatus string `json:"actor_status"`
+}
+
 func (c *Client) GetPolicyProfile(actorID string) (*PolicyProfile, error) {
 	resp, err := c.HTTP.Get(fmt.Sprintf("%s/actors/%s/policy-profile", c.BaseURL, actorID))
 	if err != nil {
@@ -86,6 +101,34 @@ func (c *Client) VerifySignature(principalID, actorID, authorization string) (bo
 		return false, err
 	}
 	return out.Valid, nil
+}
+
+func (c *Client) VerifySignatureAdvanced(reqBody VerifySignatureRequest, authorization string) (VerifySignatureResponse, error) {
+	b, err := json.Marshal(reqBody)
+	if err != nil {
+		return VerifySignatureResponse{}, err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.BaseURL+"/verify-signature", bytes.NewReader(b))
+	if err != nil {
+		return VerifySignatureResponse{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return VerifySignatureResponse{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return VerifySignatureResponse{}, fmt.Errorf("ial returned %d", resp.StatusCode)
+	}
+	var out VerifySignatureResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return VerifySignatureResponse{}, err
+	}
+	return out, nil
 }
 
 func (c *Client) ListActors(principalID string, actorType string) ([]Actor, error) {

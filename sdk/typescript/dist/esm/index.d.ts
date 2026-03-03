@@ -187,7 +187,20 @@ export type SignatureEnvelopeV2 = {
     context?: string;
     key_id?: string;
 };
-export type SignatureEnvelope = SignatureEnvelopeV1 | SignatureEnvelopeV2;
+export type SignatureEnvelopeV3 = {
+    version: 'sig-v3';
+    algorithm: 'webauthn-es256';
+    credential_id: string;
+    challenge_id: string;
+    client_data_json: string;
+    authenticator_data: string;
+    signature: string;
+    payload_hash: string;
+    issued_at: string;
+    context?: string;
+    key_id?: string;
+};
+export type SignatureEnvelope = SignatureEnvelopeV1 | SignatureEnvelopeV2 | SignatureEnvelopeV3;
 export type DelegationRevocationV1 = {
     version: 'delegation-revocation-v1';
     revocation_id: string;
@@ -265,6 +278,10 @@ export type Capabilities = {
     signatures: {
         envelopes?: string[];
         algorithms?: string[];
+    };
+    webauthn?: {
+        approval_sig_v3?: boolean;
+        uv_required?: boolean;
     };
     features?: Record<string, unknown>;
 };
@@ -384,6 +401,7 @@ export declare class ContractLaneClient {
     fetchCapabilities(): Promise<Capabilities>;
     requireProtocolV1(): Promise<void>;
     requireProtocolV2ES256(): Promise<void>;
+    requireProtocolV3WebAuthn(): Promise<void>;
     approvalDecide(approvalRequestId: string, input: ApprovalDecideInput): Promise<Record<string, unknown>>;
     private parseGate;
     private request;
@@ -407,6 +425,7 @@ export declare function parseAgentId(id: string): {
 export declare function isValidAgentId(id: string): boolean;
 export declare function parseSigV1(sig: SignatureEnvelopeV1, expectedContext?: string): SignatureEnvelopeV1;
 export declare function parseSigV2(sig: SignatureEnvelopeV2, expectedContext?: string): SignatureEnvelopeV2;
+export declare function parseSigV3(sig: SignatureEnvelopeV3, expectedContext?: string): SignatureEnvelopeV3;
 export declare function parseSignatureEnvelope(sig: SignatureEnvelope, expectedContext?: string): SignatureEnvelope;
 export declare function normalizeAmountV1(currency: string, minorUnits: number): CommerceAmountV1;
 export declare function parseAmountV1(amount: CommerceAmountV1): bigint;
@@ -445,3 +464,30 @@ export declare function signCommerceAcceptV1ES256(acc: CommerceAcceptV1, private
 export declare function verifyCommerceAcceptV1(acc: CommerceAcceptV1, sig: SignatureEnvelope): void;
 export declare function buildSignatureEnvelopeV1(payload: any, secretKey: Uint8Array, issuedAt: Date, context?: string, keyId?: string): SignatureEnvelopeV1;
 export declare function buildSignatureEnvelopeV2(payload: any, privateKey: string | Buffer | KeyObject, issuedAt: Date, context?: string, keyId?: string): SignatureEnvelopeV2;
+export type VerifySigV3Options = {
+    expectedContext?: string;
+    expectedChallengeB64URL?: string;
+    allowedOrigins?: string[];
+    expectedRPID?: string;
+    expectedCredentialID?: string;
+    credentialPublicKeySec1: Uint8Array;
+    previousSignCount?: number;
+};
+export declare function verifySigV3(payload: any, sig: SignatureEnvelopeV3, opts: VerifySigV3Options): {
+    signCount: number;
+    origin: string;
+};
+export type BuildSigV3Input = {
+    payload: any;
+    challengeId: string;
+    context?: string;
+    issuedAt: Date;
+    assertion: {
+        credentialId: Uint8Array;
+        clientDataJSON: Uint8Array;
+        authenticatorData: Uint8Array;
+        signatureDER: Uint8Array;
+    };
+    keyId?: string;
+};
+export declare function buildSigV3FromWebAuthnAssertion(input: BuildSigV3Input): SignatureEnvelopeV3;

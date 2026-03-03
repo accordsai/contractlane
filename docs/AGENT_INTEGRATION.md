@@ -11,6 +11,7 @@ Hosted/public first path:
 An integrating agent should implement:
 
 - `sig-v1` signing (at least `ed25519`) with required `issued_at` (UTC RFC3339/RFC3339Nano with `Z`).
+- Optional browser/human approval path via `sig-v3` (`webauthn-es256`) for `contract-action`.
 - Canonical payload hashing exactly as required by protocol objects.
 - Contract Lane API calls for contract actions and approvals.
 - Offline verification of returned evidence/proof artifacts.
@@ -44,6 +45,12 @@ Optional hosted commerce endpoints:
 
 - `POST /commerce/intents`
 - `POST /commerce/accepts`
+
+Optional WebAuthn approval endpoints (IAL):
+
+- `POST /ial/webauthn/credentials/register/start`
+- `POST /ial/webauthn/credentials/register/finish`
+- `POST /ial/webauthn/assertions/start`
 
 ## Template Selection vs Template Authoring
 
@@ -145,6 +152,7 @@ For the exact hosted request/response chain, see `docs/HOSTED_AGENT_JOURNEY.md`.
 - Validate `context` when using signature envelopes.
 - Verify proofs/evidence offline before settlement decisions.
 - Rotate keys with `key_id` if your key management supports it.
+- For `sig-v3`, require WebAuthn UV+UP and enforce origin/RP binding.
 
 ## Go Snippet (sig-v1 signing shape)
 

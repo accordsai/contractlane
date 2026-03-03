@@ -70,16 +70,30 @@ func (s *Store) UpsertSeedTemplate(ctx context.Context) (string, error) {
 	}
 	defer tx.Rollback(ctx)
 
-	_, _ = tx.Exec(ctx, `INSERT INTO templates(template_id,template_version,contract_type,jurisdiction,display_name,risk_tier,status,visibility,published_at)
-VALUES($1,'v1','NDA','US','NDA (US) v1','LOW','PUBLISHED','GLOBAL',now())
-ON CONFLICT (template_id) DO NOTHING`, tplID)
+	if _, err := tx.Exec(ctx, `INSERT INTO templates(template_id,template_version,contract_type,jurisdiction,display_name,risk_tier,status,visibility,published_at,published_by,archived_at,archived_by)
+	VALUES($1,'v1','NDA','US','NDA (US) v1','LOW','PUBLISHED','GLOBAL',now(),NULL,NULL,NULL)
+	ON CONFLICT (template_id) DO UPDATE SET
+	  template_version=EXCLUDED.template_version,
+	  contract_type=EXCLUDED.contract_type,
+	  jurisdiction=EXCLUDED.jurisdiction,
+	  display_name=EXCLUDED.display_name,
+	  risk_tier=EXCLUDED.risk_tier,
+	  status='PUBLISHED',
+	  visibility='GLOBAL',
+	  published_at=COALESCE(templates.published_at, now()),
+	  archived_at=NULL,
+	  archived_by=NULL`, tplID); err != nil {
+		return "", err
+	}
 
-	_, _ = tx.Exec(ctx, `INSERT INTO template_governance(template_id,template_gates,protected_slots,prohibited_slots)
+	if _, err := tx.Exec(ctx, `INSERT INTO template_governance(template_id,template_gates,protected_slots,prohibited_slots)
 VALUES($1,'{"SEND_FOR_SIGNATURE":"DEFER"}'::jsonb,'{}','{}')
-ON CONFLICT (template_id) DO NOTHING`, tplID)
+ON CONFLICT (template_id) DO NOTHING`, tplID); err != nil {
+		return "", err
+	}
 
 	// Variables: effective_date (agent allowed), party_address (defer), price (defer)
-	_, _ = tx.Exec(ctx, `INSERT INTO template_variables(template_id,var_key,var_type,required,sensitivity,set_policy,constraints)
+	if _, err := tx.Exec(ctx, `INSERT INTO template_variables(template_id,var_key,var_type,required,sensitivity,set_policy,constraints)
 VALUES
 ($1,'effective_date','DATE',true,'NONE','AGENT_ALLOWED','{}'::jsonb),
 ($1,'party_address','ADDRESS',true,'PII','DEFER_TO_IDENTITY','{}'::jsonb),
@@ -89,7 +103,9 @@ ON CONFLICT (template_id,var_key) DO UPDATE SET
   required=EXCLUDED.required,
   sensitivity=EXCLUDED.sensitivity,
   set_policy=EXCLUDED.set_policy,
-  constraints=EXCLUDED.constraints`, tplID)
+  constraints=EXCLUDED.constraints`, tplID); err != nil {
+		return "", err
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return "", err

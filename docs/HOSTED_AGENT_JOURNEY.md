@@ -11,7 +11,7 @@ By the end of this flow you will:
 - choose a template
 - create a contract
 - optionally apply contract-specific rules requirements
-- submit action approvals with `sig-v1`
+- submit action approvals with `sig-v1`/`sig-v2`/`sig-v3`
 - fetch and verify `proof-bundle-v1` offline
 
 ## 1) Provision Identity (Public Signup)
@@ -120,7 +120,7 @@ Practical split:
 - Use templates to define reusable structure/governance.
 - Use rules for per-contract validation requirements (for example settlement status/amount requirements).
 
-## 6) Execute Action and Decide Approval (sig-v1)
+## 6) Execute Action and Decide Approval (sig-v1 / sig-v2 / sig-v3)
 
 Attempt action:
 - `POST /cel/contracts/{contract_id}/actions/{action}`
@@ -130,7 +130,12 @@ If response is `BLOCKED` with `APPROVE_ACTION`, call:
 
 Provide:
 - `signed_payload`
-- `signature_envelope` (`sig-v1`, context `contract-action` when present)
+- `signature_envelope` (`sig-v1`, `sig-v2`, or `sig-v3`, context `contract-action` when present)
+
+`sig-v3` (WebAuthn) note:
+- Start assertion challenge: `POST /ial/webauthn/assertions/start`
+- Build `sig-v3` envelope from browser assertion
+- Submit that envelope in approval decide
 
 Concrete request/response chain:
 

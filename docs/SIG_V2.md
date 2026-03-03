@@ -33,3 +33,4 @@ Like `sig-v1`, `sig-v2` signs the 32 decoded bytes of `payload_hash` (not raw pa
 Compatibility note:
 
 - API boundary verifiers may accept DER ECDSA signatures for input compatibility, but SDKs emit canonical raw64.
+- WebAuthn browser approvals use additive `sig-v3`; see `docs/SIG_V3.md`.

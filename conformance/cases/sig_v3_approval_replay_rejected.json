@@ -1,0 +1,4 @@
+{
+  "name": "sig_v3_approval_replay_rejected",
+  "description": "sig-v3 assertion replay is rejected due to single-use challenge semantics."
+}
